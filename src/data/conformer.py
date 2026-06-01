@@ -255,7 +255,7 @@ def inner_smi2coords(
         ps = AllChem.ETKDGv3()
         ps.randomSeed = seed
         ps.useRandomCoords = bool(use_random)
-        ps.maxAttempts = int(max_attempts)
+        ps.maxIterations = int(max_attempts)
         ps.numThreads = 0 
         # check this code
         if prune_conf:
