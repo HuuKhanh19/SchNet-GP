@@ -354,15 +354,4 @@ def build_schnet_model(config: Dict) -> SchNet:
         task_type=config['dataset']['task_type'],
     )
 
-    # Load QM9 pretrained backbone if configured
-    pretrain_cfg = config.get('pretrain', {})
-    if pretrain_cfg.get('use_qm9_pretrained', False):
-        from .pretrained import load_pretrained_qm9_backbone
-        schnet_model = load_pretrained_qm9_backbone(
-            model=schnet_model,
-            target=pretrain_cfg.get('qm9_target', 7),
-            cache_dir=pretrain_cfg.get('cache_dir', 'pretrained'),
-            verbose=True,
-        )
-
     return schnet_model
