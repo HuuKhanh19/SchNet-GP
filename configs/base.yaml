@@ -61,11 +61,11 @@ data:
   processed_dir: "data/processed"
   split_ratio: [0.8, 0.1, 0.1]
   split_method: "random_scaffold"
-  random_seed_split: 4
+  random_seed_split: 0
 
 # ___ Conformer Generation ___________________________________________________
 conformer:
-  num_conformers: 10
+  num_conformers: 1
   max_attempts: 500
   prune_rms_thresh: 0.0
   use_random_coords: false

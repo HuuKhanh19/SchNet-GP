@@ -267,8 +267,12 @@ def inner_smi2coords(
         work_mol = AllChem.AddHs(work_mol_no_H)
     except Exception as e:
         print(f"An error with smi {smi}, {e}")
+        if return_energy:
+            return [None], [None], []
         return [None], [None]
     if work_mol is None:
+        if return_energy:
+            return [None], [None], []
         return [None], [None]
     
     if len(work_mol.GetAtoms()) > 400 or return_2d:
@@ -289,6 +293,8 @@ def inner_smi2coords(
         
         coordinates = coords[keep_idx]
         assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
+        if return_energy:
+            return [atoms], [coordinates], [0.0]
         return [atoms], [coordinates]
         
 

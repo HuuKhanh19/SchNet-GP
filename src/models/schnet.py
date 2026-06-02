@@ -237,8 +237,8 @@ class SchNet(nn.Module):
 
         # 3. Interaction blocks (residual)
         for interaction in self.interactions:
-            # h = h + interaction(h, edge_index, edge_weight, edge_attr)
-            h = h + F.dropout(interaction(h, edge_index, edge_weight, edge_attr), 0.3)
+            h = h + interaction(h, edge_index, edge_weight, edge_attr)
+            # h = h + F.dropout(interaction(h, edge_index, edge_weight, edge_attr), 0.3)
         
 
         # Step 3 hook: return hidden atom embeddings (H-dim) before output net

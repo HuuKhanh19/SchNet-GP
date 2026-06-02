@@ -208,21 +208,30 @@ class SchNetMolDataset(Dataset):
 
         self.atomic_numbers = []
         self.positions = []
+        self.energies = []
 
+        cache_ok = False
         if cache_path and os.path.exists(cache_path):
-            print(f"  Loading conformer cache: {cache_path}")
             with open(cache_path, "rb") as f:
                 cache = pickle.load(f)
-            self.atomic_numbers = cache["atomic_numbers"]
-            self.positions = cache["positions"]
-        else:
+            if "energies" in cache:
+                print(f"  Loading conformer cache: {cache_path}")
+                self.atomic_numbers = cache["atomic_numbers"]
+                self.positions = cache["positions"]
+                self.energies = cache["energies"]
+                cache_ok = True
+            else:
+                print(f"  Cache missing 'energies' (old format), regenerating: {cache_path}")
+
+        if not cache_ok:
             self._generate_conformers()
             if cache_path:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 with open(cache_path, "wb") as f:
                     pickle.dump(
                         {"atomic_numbers": self.atomic_numbers,
-                         "positions": self.positions},
+                         "positions": self.positions,
+                         "energies": self.energies},   # NEW
                         f,
                     )
                 print(f"  Saved conformer cache: {cache_path}")
@@ -257,6 +266,7 @@ class SchNetMolDataset(Dataset):
             ):
                 self.atomic_numbers.append(None)
                 self.positions.append(None)
+                self.energies.append(None)
             else:
                 z = np.array(
                     [pt.GetAtomicNumber(s) for s in atoms_list[0]],
@@ -280,15 +290,16 @@ class SchNetMolDataset(Dataset):
                 if len(valid_coords) == 0:
                     self.atomic_numbers.append(None)
                     self.positions.append(None)
+                    self.energies.append(None)
                 else:
-                    # Sort conformers by energy (ascending)
-                    # x0 = lowest energy conformer, x_{K-1} = highest
                     energy_arr = np.array(valid_energies, dtype=np.float32)
                     sort_order = np.argsort(energy_arr)
                     sorted_coords = [valid_coords[j] for j in sort_order]
- 
+                    sorted_energies = energy_arr[sort_order]      # NEW
+
                     self.atomic_numbers.append(z)
                     self.positions.append(np.stack(sorted_coords, axis=0))
+                    self.energies.append(sorted_energies)         # NEW
  
             if (i + 1) % 100 == 0:
                 print(f"    Conformer generation: {i+1}/{len(self.smiles)}")
@@ -306,6 +317,7 @@ class SchNetMolDataset(Dataset):
             self.targets = self.targets[valid_mask]
             self.atomic_numbers = [z for z, v in zip(self.atomic_numbers, valid_mask) if v]
             self.positions = [p for p, v in zip(self.positions, valid_mask) if v]
+            self.energies = [e for e, v in zip(self.energies, valid_mask) if v]   # NEW
 
     def __len__(self):
         return len(self.smiles)
@@ -314,10 +326,12 @@ class SchNetMolDataset(Dataset):
         z = torch.from_numpy(self.atomic_numbers[idx])
         pos = torch.from_numpy(self.positions[idx])
         y = torch.tensor(self.targets[idx], dtype=torch.float32)
+        energies = torch.from_numpy(np.asarray(self.energies[idx], dtype=np.float32))  # NEW
 
         return {
             "atomic_numbers": z,       # (n_atoms,)
             "positions": pos,          # (k, n_atoms, 3)
+            "energies": energies,
             "target": y,
             "num_atoms": torch.tensor(z.shape[0], dtype=torch.long),
             "num_conformers": torch.tensor(pos.shape[0], dtype=torch.long),
@@ -347,6 +361,7 @@ def collate_multi_conformer(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     targets = []
     num_atoms_per_mol = []
     num_confs_per_mol = []
+    conf_energies_all = []
 
     conf_global_idx = 0
 
@@ -361,6 +376,7 @@ def collate_multi_conformer(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         num_atoms_per_mol.append(n_atoms)
         num_confs_per_mol.append(k)
         targets.append(y)
+        energies_item = item["energies"]          # (k,)
 
         for conf_idx in range(k):
             atomic_numbers_all.append(z)
@@ -369,8 +385,8 @@ def collate_multi_conformer(batch: List[Dict]) -> Dict[str, torch.Tensor]:
                 torch.full((n_atoms,), conf_global_idx, dtype=torch.long)
             )
             conf_to_mol_all.append(mol_idx)
+            conf_energies_all.append(energies_item[conf_idx])   # per-conformer, trong loop
             conf_global_idx += 1
-
     return {
         "_atomic_numbers": torch.cat(atomic_numbers_all, dim=0),
         "_positions": torch.cat(positions_all, dim=0),
@@ -379,6 +395,7 @@ def collate_multi_conformer(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "target": torch.stack(targets, dim=0),
         "num_atoms_per_mol": torch.tensor(num_atoms_per_mol, dtype=torch.long),
         "num_confs_per_mol": torch.tensor(num_confs_per_mol, dtype=torch.long),
+        "conf_energies": torch.stack(conf_energies_all, dim=0),   # NEW: (num_total_confs,)
     }
 
 
