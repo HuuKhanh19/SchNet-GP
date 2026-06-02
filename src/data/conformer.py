@@ -298,7 +298,7 @@ def inner_smi2coords(
         return [atoms], [coordinates]
         
 
-    # 1) quick single conformer
+    # 1) quick single conformer 
     conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=False, max_attempts=200)
     # for cid in conf_ids:
     #     pos = work_mol.GetConformer(cid).GetPositions()
