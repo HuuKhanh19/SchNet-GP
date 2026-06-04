@@ -9,13 +9,22 @@ Pipeline (regression only; BACE/classification deferred):
     PHASE 1  train one MFC expert per energy bin (target = per-conf Delta)
     PHASE 2  freeze experts, fit tau for softmax(-dE/tau) aggregation
     EVAL     aggregate per-conf predictions -> y_hat ; RMSE/MAE
+
+Logging additions (vs the original "single-shot" version):
+    * PHASE 1  : per-expert in-sample RMSE(Delta) + Pearson r on its energy bin.
+    * after P1 : a train+val RMSE "checkpoint" at the provisional tau, so you see
+                 where the model stands BEFORE tau is tuned.
+    * PHASE 2  : train AND val RMSE printed every `tau_log_every` Adam steps
+                 (val is logging-only, it never enters the loss).
+    * EVAL     : train metrics printed next to valid/test.
+    * everything is also appended to self.history and dumped to history.json.
 """
 
 import json
 import math
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -44,6 +53,8 @@ class Step2Trainer:
                 "Step 2 currently supports regression only (BACE/classification deferred)."
             )
         self.s2 = config['step2']
+        # per-phase / per-step train+val log (dumped to history.json in _save)
+        self.history: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     def _extract(self, dataset, encoder):
@@ -58,24 +69,67 @@ class Step2Trainer:
         return emb, conf2mol, dE, y, list(dataset.smiles)
 
     # ------------------------------------------------------------------
-    def _fit_tau(self, s, dE, conf2mol, y, ybase, gate) -> float:
+    @staticmethod
+    def _rmse_at_tau(tau_val, s_t, dEc, c2m, yb_t, y_t, n_mol) -> float:
+        """End-to-end RMSE (y_base + aggregated Delta vs y) at a given tau.
+
+        Cheap: reuses already-computed per-conf Delta `s_t` and baseline `yb_t`;
+        only the softmax weights depend on tau, so this is fine to call inside
+        the Phase-2 loop for both train and val.
+        """
+        w = scatter_softmax(-dEc / max(float(tau_val), 1e-4), c2m, dim_size=n_mol)
+        dh = scatter_add(w * s_t, c2m, dim_size=n_mol)
+        return float(torch.sqrt(torch.mean((yb_t + dh - y_t) ** 2)))
+
+    # ------------------------------------------------------------------
+    def _fit_tau(self, s, dE, conf2mol, y, ybase, gate,
+                 val_pack: Optional[Tuple] = None) -> float:
+        """Fit aggregation temperature tau (Phase 2).
+
+        val_pack, if given, is (s_va, dE_va, conf2mol_va, y_va, ybase_va). When
+        present, train AND val RMSE are logged every `tau_log_every` Adam steps
+        so the aggregation can be watched converging instead of only seeing the
+        final number. The validation tensors are used for LOGGING ONLY.
+        """
         agg = self.s2['agg']
         if agg == 'mean':
             return float('inf')
         if agg == 'boltzmann':
             return float(self.s2['tau_init'])
 
+        # ---- train tensors (these define the loss) ----
         n_mol = len(y)
         dEc = torch.tensor(gate.clamp(dE), dtype=torch.float32)
         s_t = torch.tensor(np.asarray(s), dtype=torch.float32)
-        c2m = conf2mol.long()
+        c2m = conf2mol.long() if torch.is_tensor(conf2mol) else torch.as_tensor(conf2mol).long()
         y_t = torch.tensor(np.asarray(y), dtype=torch.float32)
         yb_t = torch.tensor(np.asarray(ybase), dtype=torch.float32)
+
+        # ---- optional val tensors (logging only) ----
+        have_val = val_pack is not None
+        if have_val:
+            s_va, dE_va, c2m_va, y_va, yb_va = val_pack
+            n_mol_va = len(y_va)
+            dEc_va = torch.tensor(gate.clamp(np.asarray(dE_va)), dtype=torch.float32)
+            s_va_t = torch.tensor(np.asarray(s_va), dtype=torch.float32)
+            c2m_va_t = (c2m_va.long() if torch.is_tensor(c2m_va)
+                        else torch.as_tensor(c2m_va).long())
+            y_va_t = torch.tensor(np.asarray(y_va), dtype=torch.float32)
+            yb_va_t = torch.tensor(np.asarray(yb_va), dtype=torch.float32)
+
+        n_steps = int(self.s2.get('tau_steps', 300))
+        log_every = int(self.s2.get('tau_log_every', 50))
 
         ti = max(float(self.s2['tau_init']), 1e-3)
         rho = torch.tensor([math.log(math.expm1(ti))], requires_grad=True)  # softplus^-1(ti)
         opt = torch.optim.Adam([rho], lr=0.05)
-        for _ in range(300):
+
+        header = f"  {'step':>5s} | {'tau':>7s} | {'train_rmse':>10s}"
+        if have_val:
+            header += f" | {'val_rmse':>8s}"
+        print(header)
+
+        for step in range(1, n_steps + 1):
             tau = torch.nn.functional.softplus(rho) + 1e-4
             w = scatter_softmax(-dEc / tau, c2m, dim_size=n_mol)
             dh = scatter_add(w * s_t, c2m, dim_size=n_mol)
@@ -83,6 +137,22 @@ class Step2Trainer:
             opt.zero_grad()
             loss.backward()
             opt.step()
+
+            if step == 1 or step % log_every == 0 or step == n_steps:
+                with torch.no_grad():
+                    tau_now = float(torch.nn.functional.softplus(rho).item() + 1e-4)
+                    tr_rmse = self._rmse_at_tau(tau_now, s_t, dEc, c2m, yb_t, y_t, n_mol)
+                    rec: Dict[str, Any] = {'phase': 'tau', 'step': step,
+                                           'tau': tau_now, 'train_rmse': tr_rmse}
+                    line = f"  {step:5d} | {tau_now:7.3f} | {tr_rmse:10.4f}"
+                    if have_val:
+                        va_rmse = self._rmse_at_tau(
+                            tau_now, s_va_t, dEc_va, c2m_va_t, yb_va_t, y_va_t, n_mol_va)
+                        rec['val_rmse'] = va_rmse
+                        line += f" | {va_rmse:8.4f}"
+                    self.history.append(rec)
+                    print(line)
+
         tau = float(torch.nn.functional.softplus(rho).item() + 1e-4)
         print(f"  Phase 2: learned tau = {tau:.3f} kcal/mol  (RT = 0.593)")
         return tau
@@ -144,44 +214,101 @@ class Step2Trainer:
             exp = MFCExpert(self.s2['expert'], device=str(self.device))
             if idx.size > 0:
                 Xb = emb_tr_s[idx]
-                db_b = torch.tensor(delta_tr_conf[idx], dtype=torch.float32)
+                tgt_b = delta_tr_conf[idx]
+                db_b = torch.tensor(tgt_b, dtype=torch.float32)
                 exp.fit(Xb, db_b, gp_seed=self.s2['expert']['gp_seed'],
                         min_samples=self.s2['gate']['min_conf_per_bin'])
+
+                # in-sample fit quality on this bin (so PHASE 1 isn't a black box)
+                pred_b = np.asarray(exp.predict(Xb))
+                rmse_b = float(np.sqrt(np.mean((pred_b - tgt_b) ** 2)))
+                if pred_b.std() > 1e-12 and tgt_b.std() > 1e-12:
+                    r_b = float(np.corrcoef(pred_b, tgt_b)[0, 1])
+                else:
+                    r_b = float('nan')
+                print(f"    -> mode={exp.mode}  train_rmse(delta)={rmse_b:.4f}  "
+                      f"pearson_r={r_b:.3f}")
+                self.history.append({'phase': 'expert', 'bin': int(b),
+                                     'n': int(idx.size), 'mode': exp.mode,
+                                     'train_rmse_delta': rmse_b,
+                                     'train_pearson_r': r_b})
             else:
                 # empty bin: degenerate ridge on a single zero so predict() returns ~0
                 exp._fit_ridge(torch.zeros(2, emb_tr_s.shape[1]), torch.zeros(2))
+                self.history.append({'phase': 'expert', 'bin': int(b), 'n': 0,
+                                     'mode': exp.mode})
             experts.append(exp)
 
-        # ---------- PHASE 2: tau ----------
-        print("\n[PHASE 2] Fitting aggregation tau ...")
+        # per-conf Delta predictions (do NOT change with tau -> compute once)
         s_tr = predict_per_conf_delta(experts, emb_tr_s, bins_tr)
-        tau = self._fit_tau(s_tr, dE_tr.numpy(), c2m_tr, y_tr.numpy(), ybase_tr, gate)
+
+        emb_va_s = std.transform(emb_va) if std else emb_va
+        bins_va = gate.route(dE_va.numpy())
+        s_va = predict_per_conf_delta(experts, emb_va_s, bins_va)
+        ybase_va = db.predict(smi_va)
+
+        # ---------- checkpoint: where do we stand BEFORE tuning tau? ----------
+        prov_tau = float(self.s2['tau_init'])
+        prov_head = ConanHead(db, std, gate, experts, agg=self.s2['agg'],
+                              tau=prov_tau, device=str(self.device))
+        ck_tr = self._eval(prov_head, emb_tr, dE_tr, c2m_tr, smi_tr, y_tr.numpy())
+        ck_va = self._eval(prov_head, emb_va, dE_va, c2m_va, smi_va, y_va.numpy())
+        print(f"  [after PHASE 1 @ agg={self.s2['agg']}, tau={prov_tau:.3f}] "
+              f"train_rmse={ck_tr['rmse']:.4f}  val_rmse={ck_va['rmse']:.4f}")
+        self.history.append({'phase': 'after_experts', 'tau': prov_tau,
+                             'train_rmse': ck_tr['rmse'], 'val_rmse': ck_va['rmse']})
+
+        # ---------- PHASE 2: tau (logs train+val each tau_log_every steps) ----------
+        print("\n[PHASE 2] Fitting aggregation tau ...")
+        val_pack = (s_va, dE_va.numpy(), c2m_va, y_va.numpy(), ybase_va)
+        tau = self._fit_tau(s_tr, dE_tr.numpy(), c2m_tr, y_tr.numpy(), ybase_tr,
+                            gate, val_pack=val_pack)
 
         head = ConanHead(db, std, gate, experts, agg=self.s2['agg'],
                          tau=tau, device=str(self.device))
 
         # ---------- EVAL ----------
         print("\n[EVAL]")
+        train_metrics = self._eval(head, emb_tr, dE_tr, c2m_tr, smi_tr, y_tr.numpy())
         valid_metrics = self._eval(head, emb_va, dE_va, c2m_va, smi_va, y_va.numpy())
         test_metrics = self._eval(head, emb_te, dE_te, c2m_te, smi_te, y_te.numpy())
+        ybase_te = db.predict(smi_te)
+        y_te_np = y_te.numpy()
+        base_rmse = float(np.sqrt(np.mean((ybase_te - y_te_np) ** 2)))
+        mean_floor = float(np.sqrt(np.mean((y_tr.numpy().mean() - y_te_np) ** 2)))
+        print(f"  [decomp] train-mean floor = {mean_floor:.4f}"
+            f"  | 2D-baseline-alone = {base_rmse:.4f}"
+            f"  | full Step2 = {test_metrics['rmse']:.4f}")
+        print(f"  Train : RMSE={train_metrics['rmse']:.4f}  MAE={train_metrics['mae']:.4f}")
         print(f"  Valid : RMSE={valid_metrics['rmse']:.4f}  MAE={valid_metrics['mae']:.4f}")
         print(f"  Test  : RMSE={test_metrics['rmse']:.4f}  MAE={test_metrics['mae']:.4f}")
+        self.history.append({'phase': 'eval', 'tau': tau,
+                             'train_rmse': train_metrics['rmse'],
+                             'val_rmse': valid_metrics['rmse'],
+                             'test_rmse': test_metrics['rmse'],
+                             'train_mae': train_metrics['mae'],
+                             'val_mae': valid_metrics['mae'],
+                             'test_mae': test_metrics['mae']})
 
         total_time = time.time() - t0
         print(f"\nStep 2 done in {total_time:.1f}s ({total_time/60:.1f}min)")
 
-        self._save(head, experts, valid_metrics, test_metrics, tau, bin_lines, total_time)
+        self._save(head, experts, train_metrics, valid_metrics, test_metrics,
+                   tau, bin_lines, total_time)
         return {
             'step': 2,
             'tau': tau,
+            'train_metrics': train_metrics,
             'valid_metrics': valid_metrics,
             'test_metrics': test_metrics,
             'expert_modes': [e.mode for e in experts],
+            'history': self.history,
             'total_time_s': total_time,
         }
 
     # ------------------------------------------------------------------
-    def _save(self, head, experts, valid_metrics, test_metrics, tau, bin_lines, total_time):
+    def _save(self, head, experts, train_metrics, valid_metrics, test_metrics,
+              tau, bin_lines, total_time):
         # interpretable constructed-feature expressions
         expr_path = os.path.join(self.experiment_dir, 'cf_expressions.txt')
         with open(expr_path, 'w') as f:
@@ -194,19 +321,25 @@ class Step2Trainer:
         # full head (note: experts contain pickled evogp forests; loads where evogp is installed)
         torch.save(head.to_state(), os.path.join(self.experiment_dir, 'conan_head.pt'))
 
+        # per-phase / per-step train+val log
+        with open(os.path.join(self.experiment_dir, 'history.json'), 'w') as f:
+            json.dump(self.history, f, indent=2, default=str)
+
         results = {
             'step': 2,
             'tau': tau,
             'expert_modes': [e.mode for e in experts],
             'bin_ranges': bin_lines,
+            'train_metrics': train_metrics,
             'valid_metrics': valid_metrics,
             'test_metrics': test_metrics,
+            'history': self.history,
             'total_time_s': total_time,
             'config': self.config,
         }
         with open(os.path.join(self.experiment_dir, 'results.json'), 'w') as f:
             json.dump(results, f, indent=2, default=str)
-        print(f"Saved results + head + CF expressions to: {self.experiment_dir}")
+        print(f"Saved results + head + CF expressions + history to: {self.experiment_dir}")
 
     # ------------------------------------------------------------------
     def _print_config(self):

@@ -5,7 +5,34 @@ import random
 import numpy as np
 import torch
 
+def set_determinism(seed: int, strict: bool = False) -> None:
+    """Pin every RNG / torch knob we can, for run-to-run reproducibility.
 
+    Pins the PyTorch side: CPU+CUDA RNG, cuDNN, cuBLAS workspace, and
+    deterministic algorithms. NOTE: EvoGP runs custom CUDA kernels for tree
+    evaluation and genetic operators; if those use non-deterministic atomics or
+    their own RNG, some residual variance may remain regardless of this. Set
+    strict=True to make PyTorch RAISE on any non-deterministic op (use this to
+    locate the offending op, then switch back to strict=False).
+    """
+    import os
+    import random
+    import numpy as np
+    import torch
+
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")  # deterministic cuBLAS
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=not strict)
+    except Exception as e:  # older torch, or an op with no deterministic impl
+        print(f"  [determinism] use_deterministic_algorithms unavailable: {e!r}")
 def seed_everything(seed: int):
     """Set all random seeds for reproducibility.
     

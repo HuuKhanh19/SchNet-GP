@@ -98,7 +98,7 @@ class DeltaBaseline:
 
         self.scaler = StandardScaler().fit(X)
         Xs = self.scaler.transform(X)
-
+        Xs = np.clip(Xs, -10.0, 10.0)
         self.ridge = RidgeCV(alphas=self.alphas).fit(Xs, np.asarray(y_train))
         y_base = self.ridge.predict(Xs)
         print(f"  Delta baseline ({self.kind}): kept {int(finite_col.sum())} features, "
@@ -112,4 +112,5 @@ class DeltaBaseline:
         Xs = self.scaler.transform(X)
         # any leftover non-finite (a test mol failing a kept descriptor) -> train mean (0)
         Xs = np.nan_to_num(Xs, nan=0.0, posinf=0.0, neginf=0.0)
+        Xs = np.clip(Xs, -10.0, 10.0) 
         return self.ridge.predict(Xs)

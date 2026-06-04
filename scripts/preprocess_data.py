@@ -11,7 +11,7 @@ sys.path.insert(0, project_root)
 
 from src.data import prepare_dataset, save_splits
 
-DATASETS = ['esol', 'freesolv', 'lipo', 'bace']
+DATASETS = ['bace']
 
 
 def preprocess_single(dataset_name: str, cfg: DictConfig):

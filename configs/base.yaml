@@ -11,9 +11,9 @@ hydra:
   output_subdir: null
 
 # ___ Global Settings _________________________________________________________
-dataset_name: esol
+dataset_name: bace
 random_seed_train: 0
-gpu: 1
+gpu: 0
 
 # ___ Experiment ______________________________________________________________
 experiment:
@@ -61,11 +61,11 @@ data:
   processed_dir: "data/processed"
   split_ratio: [0.8, 0.1, 0.1]
   split_method: "random_scaffold"
-  random_seed_split: 3
+  random_seed_split: 0
 
 # ___ Conformer Generation ___________________________________________________
 conformer:
-  num_conformers: 10
+  num_conformers: 1
   max_attempts: 500
   prune_rms_thresh: 0.0
   use_random_coords: false
@@ -92,3 +92,40 @@ training:
   early_stopping_patience: 100
   save_checkpoints: true
   gradient_clip: 1.0
+split_seeds: null
+step2:
+  encoder_checkpoint: auto
+  emb_pool: mean               # mean | add
+  standardize_emb: true
+  delta_learning: true
+  descriptors: rdkit2d         # rdkit2d | morgan | none
+  gate:
+    num_experts: 3             # 1 (=MoE off) | 2 | 3
+    gate_by: energy
+    binning: quantile
+    energy_clip: train_max
+    min_conf_per_bin: 100
+  expert:
+    q: 6
+    n_best: 64
+    pop_size: 500 #1000
+    generation_limit: 100
+    max_tree_len: 128 #128
+    max_layer_cnt: 3
+    mutation_max_layer_cnt: 3
+    mutation_rate: 0.2
+    survival_rate: 0.3
+    elite_rate: 0.01
+    const_prob: 0.5
+    out_prob: 0.5
+    layer_leaf_prob: 0.2
+    using_funcs: ['+', '-', '*', '/'] #em đang chỉnh cái này anh bình tinxhhh ~~~
+    const_range: [-3.0, 3.0]
+    sample_cnt: 8
+    ridge_alphas: [0.001, 0.01, 0.1, 1.0, 10.0]
+    gp_seed: 0
+    log_gp_every: 0            # 0 = off; N = log GP convergence every N generations
+  agg: learned_softmax         # mean | boltzmann | learned_softmax
+  tau_init: 0.593
+  tau_steps: 300
+  tau_log_every: 50

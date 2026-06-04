@@ -6,27 +6,41 @@ Usage (same data conventions as run_step1.py):
     python scripts/run_step2.py dataset_name=lipo step2.gate.num_experts=3
     python scripts/run_step2.py dataset_name=freesolv step2.delta_learning=false
 
+Per-generation GP logging (PHASE 1) -- print convergence every N generations:
+    python scripts/run_step2.py dataset_name=esol step2.expert.log_gp_every=10
+
+Multi-seed in ONE command (mean +/- std over data splits). NOTE: each split
+needs its OWN Step-1 checkpoint under
+    experiments/step1/{dataset}/seed_{split}/.../best_model.pt
+Missing checkpoints are skipped (and excluded from the average):
+    python scripts/run_step2.py dataset_name=esol +split_seeds=[0,1,2,3,4]
+
+If a `split_seeds:` key is not in configs/base.yaml, pass it with a leading '+'
+(as above) to add it, or add `split_seeds: null` to base.yaml.
+
 If a `step2:` block is absent from configs/base.yaml, the built-in DEFAULT_STEP2
 below is used (and can be overridden from the CLI as shown).
 """
 
 import os
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import sys
 import time
 import copy
+import json
 
 import hydra
+import numpy as np
 import pandas as pd
 from omegaconf import DictConfig, OmegaConf
 import torch
-
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from src.data.data_loader import prepare_dataset, save_splits, create_dataloaders
 from src.models.embedding_extractor import load_frozen_encoder, resolve_checkpoint
 from src.trainers.step2_trainer import Step2Trainer
-from src.utils.utils import seed_everything
+from src.utils.utils import seed_everything,set_determinism
 
 
 DEFAULT_STEP2 = {
@@ -39,7 +53,7 @@ DEFAULT_STEP2 = {
         'num_experts': 3,          # 1 (=MoE off) | 2 | 3
         'gate_by': 'energy',
         'binning': 'quantile',
-        'energy_clip': 'train_max',
+        'energy_clip': 'train_max', 
         'min_conf_per_bin': 100,
     },
     'expert': {
@@ -56,14 +70,17 @@ DEFAULT_STEP2 = {
         'const_prob': 0.5,
         'out_prob': 0.5,
         'layer_leaf_prob': 0.2,
-        'using_funcs': ['+', '-', '*', '/'],   # symbols in FUNCS_NAMES; add 'sin','cos','exp','log' to ablate
+        'using_funcs': ['+', '-', '*', '/', 'sin', 'cos'],   # add 'sin','cos','exp','log' to ablate
         'const_range': [-3.0, 3.0],            # standardized embeddings ~ +/-3 sigma
         'sample_cnt': 8,                       # # of constant candidates (sr_test)
         'ridge_alphas': [0.001, 0.01, 0.1, 1.0, 10.0],
         'gp_seed': 0,
+        'log_gp_every': 0,                     # 0 = off; N = log GP convergence every N gens
     },
     'agg': 'learned_softmax',      # mean | boltzmann | learned_softmax
     'tau_init': 0.593,             # RT (kcal/mol)
+    'tau_steps': 300,              # Phase-2 Adam steps
+    'tau_log_every': 50,           # log train/val RMSE every N tau steps
 }
 
 
@@ -75,6 +92,17 @@ def _deep_merge(base: dict, override: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def _pick_device(cfg: DictConfig) -> torch.device:
+    gpu = cfg.get('gpu', 0)
+    if torch.cuda.is_available() and gpu >= 0:
+        device = torch.device(f"cuda:{gpu}")
+        print(f"Using GPU: {torch.cuda.get_device_name(device)}")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+    return device
 
 
 def run_step2(config: dict, device: torch.device):
@@ -116,13 +144,71 @@ def run_step2(config: dict, device: torch.device):
     return results
 
 
+def _std(arr: np.ndarray) -> float:
+    """Sample std; 0 when there is only one run (avoids ddof=1 NaN)."""
+    return float(arr.std(ddof=1)) if arr.size > 1 else 0.0
+
+
+def _summarize_multiseed(dataset_name: str, per_seed: list, config: dict):
+    if not per_seed:
+        print("\nNo successful runs to summarize.")
+        return
+
+    seeds = [r['split_seed'] for r in per_seed]
+    vr = np.array([r['valid_metrics']['rmse'] for r in per_seed])
+    vm = np.array([r['valid_metrics']['mae'] for r in per_seed])
+    tr = np.array([r['test_metrics']['rmse'] for r in per_seed])
+    tm = np.array([r['test_metrics']['mae'] for r in per_seed])
+
+    print("\n" + "=" * 70)
+    print(f"MULTI-SEED SUMMARY  {dataset_name}  (n={len(per_seed)} splits: {seeds})")
+    print("=" * 70)
+    print(f"  {'split':<7}{'val_rmse':>10}{'val_mae':>10}{'test_rmse':>11}{'test_mae':>10}")
+    print("  " + "-" * 48)
+    for r in per_seed:
+        v, t = r['valid_metrics'], r['test_metrics']
+        print(f"  {r['split_seed']:<7}{v['rmse']:>10.4f}{v['mae']:>10.4f}"
+              f"{t['rmse']:>11.4f}{t['mae']:>10.4f}")
+    print("  " + "-" * 48)
+    print(f"  {'mean':<7}{vr.mean():>10.4f}{vm.mean():>10.4f}"
+          f"{tr.mean():>11.4f}{tm.mean():>10.4f}")
+    print(f"  {'std':<7}{_std(vr):>10.4f}{_std(vm):>10.4f}"
+          f"{_std(tr):>11.4f}{_std(tm):>10.4f}")
+    print("=" * 70)
+    print(f"\n{dataset_name}: Test RMSE = {tr.mean():.4f} +/- {_std(tr):.4f}  "
+          f"| Test MAE = {tm.mean():.4f} +/- {_std(tm):.4f}  (n={len(per_seed)})")
+
+    summary = {
+        'dataset': dataset_name,
+        'split_seeds': seeds,
+        'n_runs': len(per_seed),
+        'per_seed': [
+            {'split_seed': r['split_seed'], 'tau': r.get('tau'),
+             'valid_metrics': r['valid_metrics'], 'test_metrics': r['test_metrics']}
+            for r in per_seed
+        ],
+        'mean': {'val_rmse': float(vr.mean()), 'val_mae': float(vm.mean()),
+                 'test_rmse': float(tr.mean()), 'test_mae': float(tm.mean())},
+        'std': {'val_rmse': _std(vr), 'val_mae': _std(vm),
+                'test_rmse': _std(tr), 'test_mae': _std(tm)},
+    }
+    out_dir = os.path.join(config['experiment']['output_dir'], 'step2', dataset_name)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, 'multiseed_summary.json')
+    with open(out_path, 'w') as f:
+        json.dump(summary, f, indent=2, default=str)
+    print(f"Saved multi-seed summary to: {out_path}")
+
+
 @hydra.main(version_base=None, config_path="../configs", config_name="base")
 def main(cfg: DictConfig):
     os.chdir(hydra.utils.get_original_cwd())
+    set_determinism(int(cfg.get('random_seed_train', 42)))
 
     dataset_name = cfg.dataset_name
     assert dataset_name in cfg.datasets, (
-        f"Unknown dataset: {dataset_name}. Choose from: {list(cfg.datasets.keys())}"
+        f"Unknown dataset: {dataset_name}. "
+        f"Choose from: {list(cfg.datasets.keys())}"
     )
 
     config = OmegaConf.to_container(cfg, resolve=True)
@@ -130,17 +216,52 @@ def main(cfg: DictConfig):
     # merge built-in step2 defaults with anything present in the yaml/CLI
     config['step2'] = _deep_merge(DEFAULT_STEP2, config.get('step2', {}))
 
-    gpu = cfg.get('gpu', 0)
-    if torch.cuda.is_available() and gpu >= 0:
-        device = torch.device(f"cuda:{gpu}")
-        print(f"Using GPU: {torch.cuda.get_device_name(device)}")
-    else:
-        device = torch.device("cpu")
-        print("Using CPU")
+    device = _pick_device(cfg)
 
-    results = run_step2(config, device)
-    tm = results.get('test_metrics', {})
-    print(f"\n{dataset_name}: Test RMSE={tm.get('rmse'):.4f}, MAE={tm.get('mae'):.4f}")
+    # resolve which split seeds to run (default: the single data.random_seed_split)
+    ss = cfg.get('split_seeds', None)
+    if ss is None:
+        split_seeds = [int(config['data']['random_seed_split'])]
+    elif isinstance(ss, int):
+        split_seeds = [ss]
+    else:
+        split_seeds = [int(x) for x in ss]
+
+    # single seed -> behaves exactly like before
+    if len(split_seeds) == 1:
+        cfg_i = copy.deepcopy(config)
+        cfg_i['data']['random_seed_split'] = split_seeds[0]
+        results = run_step2(cfg_i, device)
+        tm = results.get('test_metrics', {})
+        print(f"\n{dataset_name} (split {split_seeds[0]}): "
+              f"Test RMSE={tm.get('rmse'):.4f}, MAE={tm.get('mae'):.4f}")
+        return
+
+    # multi-seed sweep in one command
+    print("\n" + "#" * 70)
+    print(f"# MULTI-SEED RUN  {dataset_name}  splits={split_seeds}")
+    print("#  each split needs its own Step-1 checkpoint; missing ones are skipped")
+    print("#" * 70)
+
+    per_seed = []
+    for sd in split_seeds:
+        print("\n" + "#" * 70)
+        print(f"# SPLIT SEED {sd}")
+        print("#" * 70)
+        cfg_i = copy.deepcopy(config)
+        cfg_i['data']['random_seed_split'] = int(sd)
+        try:
+            res = run_step2(cfg_i, device)
+        except FileNotFoundError as e:
+            print(f"  !! Skipping split {sd} (no Step-1 checkpoint?): {e}")
+            continue
+        except Exception as e:  # noqa: BLE001 - one bad split shouldn't kill the sweep
+            print(f"  !! Split {sd} failed: {e!r}")
+            continue
+        res['split_seed'] = int(sd)
+        per_seed.append(res)
+
+    _summarize_multiseed(dataset_name, per_seed, config)
 
 
 if __name__ == "__main__":

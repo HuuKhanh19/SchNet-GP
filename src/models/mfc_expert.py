@@ -19,6 +19,9 @@ Note on the design doc: this is post-hoc ridge, not in-loop ridge. EvoGP's
 `evaluate` is hard-wired to correlation and `new_feature` depends on it, so an
 in-loop joint ridge would require subclassing both and breaking the per-tree
 fitness paradigm. Documented deviation; in-loop ridge is left as a future option.
+
+Per-generation logging: set cfg["log_gp_every"]=N (>0) to print GP convergence
+(best/mean |corr|) every N generations. 0 disables it (default).
 """
 
 from typing import List, Optional
@@ -143,12 +146,32 @@ class MFCExpert:
                                        elite_rate=c["elite_rate"]),
             enable_pareto_front=False,
         )
-        # EvoGP MAXIMIZES fitness (DefaultSelection keeps highest). Maximize |corr|
-        # directly; nan_to_num so constant-output trees get fitness 0 (worst) and are
-        # culled instead of poisoning the descending sort with NaN.
+
+        # ---- per-generation GP logging -------------------------------------
+        # EvoGP calls problem.evaluate() once per generation to score the
+        # population for selection; |corr| is already computed there. We piggyback
+        # on that call to print GP convergence. log_gp_every=0 disables it.
+        # NOTE: the counter counts fitness evaluations (~= generations; the initial
+        # population is also scored, so "gen N" is the N-th evaluation).
+        log_every = int(c.get("log_gp_every", 0))
+        gen_state = {"n": 0}
+
         class _CorrMax(Transformation):
+            # MAXIMIZE |corr| directly; nan_to_num so constant-output trees get
+            # fitness 0 (worst) and are culled instead of poisoning the sort.
             def evaluate(self, forest):
-                return _abs_corr(forest, self.datapoints, self.labels)
+                fit = _abs_corr(forest, self.datapoints, self.labels)
+                if log_every:
+                    gen_state["n"] += 1
+                    g = gen_state["n"]
+                    if g == 1 or g % log_every == 0:
+                        nz = fit[fit > 0]
+                        best = float(fit.max()) if fit.numel() else 0.0
+                        mean = float(nz.mean()) if nz.numel() else 0.0
+                        alive = int((fit > 0).sum())
+                        print(f"        gen {g:3d} | best|corr|={best:.4f} | "
+                              f"mean|corr|={mean:.4f} | alive={alive}/{fit.numel()}")
+                return fit
 
         problem = _CorrMax(datapoints=X, labels=delta)
         StandardPipeline(algorithm=algo, problem=problem,
