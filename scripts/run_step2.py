@@ -1,10 +1,20 @@
 #!/usr/bin/env python
 """Step 2: frozen SchNet + energy-MoE of MFC (EvoGP) experts.
 
+Regression AND binary classification share one pipeline (task is read from the
+dataset config). Classification uses a logit baseline + functional-gradient
+pseudo-residual + sigmoid head + BCE/AUC; see src/trainers/step2_trainer.py.
+
 Usage (same data conventions as run_step1.py):
     python scripts/run_step2.py dataset_name=esol
     python scripts/run_step2.py dataset_name=lipo step2.gate.num_experts=3
     python scripts/run_step2.py dataset_name=freesolv step2.delta_learning=false
+    python scripts/run_step2.py dataset_name=bace                 # classification (AUC)
+
+NOTE on BACE / classification: with conformer.num_conformers=1 the energy gate
+and Boltzmann aggregation are inert (one conformer -> dE=0 -> single active
+expert, trivial aggregation). For a clean run keep step2.gate.num_experts=1, or
+raise conformer.num_conformers to actually exercise the energy-MoE on classification.
 
 Per-generation GP logging (PHASE 1) -- print convergence every N generations:
     python scripts/run_step2.py dataset_name=esol step2.expert.log_gp_every=10
@@ -13,7 +23,7 @@ Multi-seed in ONE command (mean +/- std over data splits). NOTE: each split
 needs its OWN Step-1 checkpoint under
     experiments/step1/{dataset}/seed_{split}/.../best_model.pt
 Missing checkpoints are skipped (and excluded from the average):
-    python scripts/run_step2.py dataset_name=esol +split_seeds=[0,1,2,3,4]
+    python scripts/run_step2.py dataset_name=bace +split_seeds=[0,1,2,3,4]
 
 If a `split_seeds:` key is not in configs/base.yaml, pass it with a leading '+'
 (as above) to add it, or add `split_seeds: null` to base.yaml.
@@ -40,7 +50,7 @@ sys.path.insert(0, project_root)
 from src.data.data_loader import prepare_dataset, save_splits, create_dataloaders
 from src.models.embedding_extractor import load_frozen_encoder, resolve_checkpoint
 from src.trainers.step2_trainer import Step2Trainer
-from src.utils.utils import seed_everything,set_determinism
+from src.utils.utils import seed_everything, set_determinism
 
 
 DEFAULT_STEP2 = {
@@ -53,7 +63,7 @@ DEFAULT_STEP2 = {
         'num_experts': 3,          # 1 (=MoE off) | 2 | 3
         'gate_by': 'energy',
         'binning': 'quantile',
-        'energy_clip': 'train_max', 
+        'energy_clip': 'train_max',
         'min_conf_per_bin': 100,
     },
     'expert': {
@@ -66,11 +76,11 @@ DEFAULT_STEP2 = {
         'mutation_max_layer_cnt': 3,           # mutation subtree depth (sr_test, shallower)
         'mutation_rate': 0.2,                  # sr_test
         'survival_rate': 0.3,                  # sr_test
-        'elite_rate': 0.01,                    # sr_test
+        'elite_rate': 0.01,
         'const_prob': 0.5,
         'out_prob': 0.5,
         'layer_leaf_prob': 0.2,
-        'using_funcs': ['+', '-', '*', '/', 'sin', 'cos'],   # add 'sin','cos','exp','log' to ablate
+        'using_funcs': ['+', '-', '*', '/', 'sin', 'cos'],   # add 'exp','log' to ablate
         'const_range': [-3.0, 3.0],            # standardized embeddings ~ +/-3 sigma
         'sample_cnt': 8,                       # # of constant candidates (sr_test)
         'ridge_alphas': [0.001, 0.01, 0.1, 1.0, 10.0],
@@ -80,7 +90,8 @@ DEFAULT_STEP2 = {
     'agg': 'learned_softmax',      # mean | boltzmann | learned_softmax
     'tau_init': 0.593,             # RT (kcal/mol)
     'tau_steps': 300,              # Phase-2 Adam steps
-    'tau_log_every': 50,           # log train/val RMSE every N tau steps
+    'tau_log_every': 50,           # log train/val metric every N tau steps
+    'logit_scale_init': 1.0,       # classification: initial global logit scale (gamma)
 }
 
 
@@ -154,50 +165,99 @@ def _summarize_multiseed(dataset_name: str, per_seed: list, config: dict):
         print("\nNo successful runs to summarize.")
         return
 
+    is_cls = (config['dataset']['task_type'] == 'classification')
     seeds = [r['split_seed'] for r in per_seed]
-    vr = np.array([r['valid_metrics']['rmse'] for r in per_seed])
-    vm = np.array([r['valid_metrics']['mae'] for r in per_seed])
-    tr = np.array([r['test_metrics']['rmse'] for r in per_seed])
-    tm = np.array([r['test_metrics']['mae'] for r in per_seed])
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 72)
     print(f"MULTI-SEED SUMMARY  {dataset_name}  (n={len(per_seed)} splits: {seeds})")
-    print("=" * 70)
-    print(f"  {'split':<7}{'val_rmse':>10}{'val_mae':>10}{'test_rmse':>11}{'test_mae':>10}")
-    print("  " + "-" * 48)
-    for r in per_seed:
-        v, t = r['valid_metrics'], r['test_metrics']
-        print(f"  {r['split_seed']:<7}{v['rmse']:>10.4f}{v['mae']:>10.4f}"
-              f"{t['rmse']:>11.4f}{t['mae']:>10.4f}")
-    print("  " + "-" * 48)
-    print(f"  {'mean':<7}{vr.mean():>10.4f}{vm.mean():>10.4f}"
-          f"{tr.mean():>11.4f}{tm.mean():>10.4f}")
-    print(f"  {'std':<7}{_std(vr):>10.4f}{_std(vm):>10.4f}"
-          f"{_std(tr):>11.4f}{_std(tm):>10.4f}")
-    print("=" * 70)
-    print(f"\n{dataset_name}: Test RMSE = {tr.mean():.4f} +/- {_std(tr):.4f}  "
-          f"| Test MAE = {tm.mean():.4f} +/- {_std(tm):.4f}  (n={len(per_seed)})")
+    print("=" * 72)
 
-    summary = {
-        'dataset': dataset_name,
-        'split_seeds': seeds,
-        'n_runs': len(per_seed),
-        'per_seed': [
-            {'split_seed': r['split_seed'], 'tau': r.get('tau'),
-             'valid_metrics': r['valid_metrics'], 'test_metrics': r['test_metrics']}
-            for r in per_seed
-        ],
-        'mean': {'val_rmse': float(vr.mean()), 'val_mae': float(vm.mean()),
-                 'test_rmse': float(tr.mean()), 'test_mae': float(tm.mean())},
-        'std': {'val_rmse': _std(vr), 'val_mae': _std(vm),
-                'test_rmse': _std(tr), 'test_mae': _std(tm)},
-    }
+    if is_cls:
+        va = np.array([r['valid_metrics']['auc'] for r in per_seed])
+        vacc = np.array([r['valid_metrics']['acc'] for r in per_seed])
+        ta = np.array([r['test_metrics']['auc'] for r in per_seed])
+        tacc = np.array([r['test_metrics']['acc'] for r in per_seed])
+
+        print(f"  {'split':<7}{'val_auc':>10}{'val_acc':>10}{'test_auc':>11}{'test_acc':>10}")
+        print("  " + "-" * 48)
+        for r in per_seed:
+            v, t = r['valid_metrics'], r['test_metrics']
+            print(f"  {r['split_seed']:<7}{v['auc']:>10.4f}{v['acc']:>10.4f}"
+                  f"{t['auc']:>11.4f}{t['acc']:>10.4f}")
+        print("  " + "-" * 48)
+        print(f"  {'mean':<7}{np.nanmean(va):>10.4f}{np.nanmean(vacc):>10.4f}"
+              f"{np.nanmean(ta):>11.4f}{np.nanmean(tacc):>10.4f}")
+        print(f"  {'std':<7}{_std(va):>10.4f}{_std(vacc):>10.4f}"
+              f"{_std(ta):>11.4f}{_std(tacc):>10.4f}")
+        print("=" * 72)
+        print(f"\n{dataset_name}: Test AUC = {np.nanmean(ta):.4f} +/- {_std(ta):.4f}  "
+              f"| Test ACC = {np.nanmean(tacc):.4f} +/- {_std(tacc):.4f}  (n={len(per_seed)})")
+
+        summary = {
+            'dataset': dataset_name, 'task': 'classification',
+            'split_seeds': seeds, 'n_runs': len(per_seed),
+            'per_seed': [
+                {'split_seed': r['split_seed'], 'tau': r.get('tau'), 'gamma': r.get('gamma'),
+                 'valid_metrics': r['valid_metrics'], 'test_metrics': r['test_metrics']}
+                for r in per_seed
+            ],
+            'mean': {'val_auc': float(np.nanmean(va)), 'val_acc': float(np.nanmean(vacc)),
+                     'test_auc': float(np.nanmean(ta)), 'test_acc': float(np.nanmean(tacc))},
+            'std': {'val_auc': _std(va), 'val_acc': _std(vacc),
+                    'test_auc': _std(ta), 'test_acc': _std(tacc)},
+        }
+    else:
+        vr = np.array([r['valid_metrics']['rmse'] for r in per_seed])
+        vm = np.array([r['valid_metrics']['mae'] for r in per_seed])
+        tr = np.array([r['test_metrics']['rmse'] for r in per_seed])
+        tm = np.array([r['test_metrics']['mae'] for r in per_seed])
+
+        print(f"  {'split':<7}{'val_rmse':>10}{'val_mae':>10}{'test_rmse':>11}{'test_mae':>10}")
+        print("  " + "-" * 48)
+        for r in per_seed:
+            v, t = r['valid_metrics'], r['test_metrics']
+            print(f"  {r['split_seed']:<7}{v['rmse']:>10.4f}{v['mae']:>10.4f}"
+                  f"{t['rmse']:>11.4f}{t['mae']:>10.4f}")
+        print("  " + "-" * 48)
+        print(f"  {'mean':<7}{vr.mean():>10.4f}{vm.mean():>10.4f}"
+              f"{tr.mean():>11.4f}{tm.mean():>10.4f}")
+        print(f"  {'std':<7}{_std(vr):>10.4f}{_std(vm):>10.4f}"
+              f"{_std(tr):>11.4f}{_std(tm):>10.4f}")
+        print("=" * 72)
+        print(f"\n{dataset_name}: Test RMSE = {tr.mean():.4f} +/- {_std(tr):.4f}  "
+              f"| Test MAE = {tm.mean():.4f} +/- {_std(tm):.4f}  (n={len(per_seed)})")
+
+        summary = {
+            'dataset': dataset_name, 'task': 'regression',
+            'split_seeds': seeds, 'n_runs': len(per_seed),
+            'per_seed': [
+                {'split_seed': r['split_seed'], 'tau': r.get('tau'),
+                 'valid_metrics': r['valid_metrics'], 'test_metrics': r['test_metrics']}
+                for r in per_seed
+            ],
+            'mean': {'val_rmse': float(vr.mean()), 'val_mae': float(vm.mean()),
+                     'test_rmse': float(tr.mean()), 'test_mae': float(tm.mean())},
+            'std': {'val_rmse': _std(vr), 'val_mae': _std(vm),
+                    'test_rmse': _std(tr), 'test_mae': _std(tm)},
+        }
+
     out_dir = os.path.join(config['experiment']['output_dir'], 'step2', dataset_name)
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, 'multiseed_summary.json')
     with open(out_path, 'w') as f:
         json.dump(summary, f, indent=2, default=str)
     print(f"Saved multi-seed summary to: {out_path}")
+
+
+def _print_single(dataset_name: str, split_seed: int, results: dict, is_cls: bool):
+    tm = results.get('test_metrics', {})
+    if is_cls:
+        print(f"\n{dataset_name} (split {split_seed}): "
+              f"Test AUC={tm.get('auc'):.4f}, ACC={tm.get('acc'):.4f}, "
+              f"logloss={tm.get('logloss'):.4f}")
+    else:
+        print(f"\n{dataset_name} (split {split_seed}): "
+              f"Test RMSE={tm.get('rmse'):.4f}, MAE={tm.get('mae'):.4f}")
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="base")
@@ -215,6 +275,7 @@ def main(cfg: DictConfig):
     config['dataset'] = config['datasets'][dataset_name]
     # merge built-in step2 defaults with anything present in the yaml/CLI
     config['step2'] = _deep_merge(DEFAULT_STEP2, config.get('step2', {}))
+    is_cls = (config['dataset']['task_type'] == 'classification')
 
     device = _pick_device(cfg)
 
@@ -232,9 +293,7 @@ def main(cfg: DictConfig):
         cfg_i = copy.deepcopy(config)
         cfg_i['data']['random_seed_split'] = split_seeds[0]
         results = run_step2(cfg_i, device)
-        tm = results.get('test_metrics', {})
-        print(f"\n{dataset_name} (split {split_seeds[0]}): "
-              f"Test RMSE={tm.get('rmse'):.4f}, MAE={tm.get('mae'):.4f}")
+        _print_single(dataset_name, split_seeds[0], results, is_cls)
         return
 
     # multi-seed sweep in one command

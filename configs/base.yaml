@@ -13,7 +13,7 @@ hydra:
 # ___ Global Settings _________________________________________________________
 dataset_name: bace
 random_seed_train: 0
-gpu: 0
+gpu: 1
 
 # ___ Experiment ______________________________________________________________
 experiment:
@@ -61,11 +61,11 @@ data:
   processed_dir: "data/processed"
   split_ratio: [0.8, 0.1, 0.1]
   split_method: "random_scaffold"
-  random_seed_split: 0
+  random_seed_split: 4
 
 # ___ Conformer Generation ___________________________________________________
 conformer:
-  num_conformers: 1
+  num_conformers: 10
   max_attempts: 500
   prune_rms_thresh: 0.0
   use_random_coords: false
@@ -100,7 +100,7 @@ step2:
   delta_learning: true
   descriptors: rdkit2d         # rdkit2d | morgan | none
   gate:
-    num_experts: 3             # 1 (=MoE off) | 2 | 3
+    num_experts: 4             # 1 (=MoE off) | 2 | 3
     gate_by: energy
     binning: quantile
     energy_clip: train_max
@@ -108,7 +108,7 @@ step2:
   expert:
     q: 6
     n_best: 64
-    pop_size: 500 #1000
+    pop_size: 1000 #1000
     generation_limit: 100
     max_tree_len: 128 #128
     max_layer_cnt: 3
@@ -119,7 +119,7 @@ step2:
     const_prob: 0.5
     out_prob: 0.5
     layer_leaf_prob: 0.2
-    using_funcs: ['+', '-', '*', '/'] #em đang chỉnh cái này anh bình tinxhhh ~~~
+    using_funcs: ['+', '-', '*', '/']
     const_range: [-3.0, 3.0]
     sample_cnt: 8
     ridge_alphas: [0.001, 0.01, 0.1, 1.0, 10.0]
