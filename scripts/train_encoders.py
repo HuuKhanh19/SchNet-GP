@@ -41,7 +41,7 @@ from src.utils.utils import seed_everything
 
 def train_one(dataset: str, encoder_conformers: str, k_multi: int, seed: int,
               gpu: int, epochs: int, split_method: str, ckpt_dir: str,
-              processed_dir: str, raw_dir: str) -> str:
+              processed_dir: str, raw_dir: str, deterministic: bool = False) -> str:
     """Train 1 encoder cho (encoder_conformers, seed), lưu checkpoint, trả path."""
     K = 1 if encoder_conformers == "single" else int(k_multi)
 
@@ -62,7 +62,7 @@ def train_one(dataset: str, encoder_conformers: str, k_multi: int, seed: int,
     config = build_config(args)
     config["data"]["random_seed_split"] = seed
 
-    seed_everything(args.seed_train, deterministic=False)
+    seed_everything(args.seed_train, deterministic=deterministic)
     device = (torch.device(f"cuda:{gpu}")
               if torch.cuda.is_available() and gpu >= 0 else torch.device("cpu"))
 
@@ -104,6 +104,7 @@ def train_one(dataset: str, encoder_conformers: str, k_multi: int, seed: int,
         "num_conformers": K,
         "seed": seed,
         "split_method": split_method,
+        "deterministic": deterministic,
         "target_mean": float(model.target_mean),
         "target_std": float(model.target_std),
         "test_metrics": results.get("test_metrics", {}),
@@ -122,6 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--epochs", type=int, default=300)
+    p.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="Bật torch deterministic khi train encoder -> re-train ra "
+                        "cùng weights (chậm hơn; scatter-add GPU warn_only nên không "
+                        "đảm bảo tuyệt đối). Mặc định TẮT (giống baseline). KHÔNG cần "
+                        "cho độ ổn định lúc extract (đã eval+no_grad+cache).")
     p.add_argument("--split-method", default="random_scaffold", dest="split_method")
     p.add_argument("--ckpt-dir", default="pretrained", dest="ckpt_dir")
     p.add_argument("--processed-dir", default="data/processed", dest="processed_dir")
@@ -135,7 +142,8 @@ def main():
     for enc in encoders:
         for seed in args.seeds:
             train_one(args.dataset, enc, args.k_multi, seed, args.gpu, args.epochs,
-                      args.split_method, args.ckpt_dir, args.processed_dir, args.raw_dir)
+                      args.split_method, args.ckpt_dir, args.processed_dir, args.raw_dir,
+                      deterministic=args.deterministic)
 
 
 if __name__ == "__main__":
