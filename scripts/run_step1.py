@@ -197,9 +197,6 @@ def run_step1(config: dict, device: torch.device) -> dict:
         std_target = float(train_df["target"].std())
         model.set_normalization(mean_target, std_target)
 
-    print(f"Model: {model.num_params:,} params, "
-          f"{model.num_trainable_params:,} trainable")
-
     if config["experiment"].get("verbose", False):
         print("\n" + "=" * 60)
         print("MODEL PARAMETER SHAPES")
@@ -225,9 +222,22 @@ def run_step1(config: dict, device: torch.device) -> dict:
     return results
 
 
+def print_overrides(parser: argparse.ArgumentParser, args: argparse.Namespace):
+    """In gọn các hyper được truyền khác giá trị default."""
+    defaults = parser.parse_args([])
+    changed = {k: v for k, v in vars(args).items() if getattr(defaults, k) != v}
+    if changed:
+        items = ", ".join(f"{k}={v}" for k, v in changed.items())
+        print(f"Hyper khác default: {items}")
+    else:
+        print("Hyper: tất cả default")
+
+
 def main():
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
     config = build_config(args)
+    print_overrides(parser, args)
 
     # Device
     gpu = config["gpu"]
@@ -244,7 +254,7 @@ def main():
     tm = results.get("test_metrics", {})
     dataset_name = config["dataset_name"]
     if "rmse" in tm:
-        print(f"\n{dataset_name}: RMSE={tm['rmse']:.4f}, MAE={tm['mae']:.4f}")
+        print(f"\n{dataset_name}: RMSE={tm['rmse']:.4f}")
     elif "auc" in tm:
         print(f"\n{dataset_name}: AUC={tm['auc']:.4f}")
 

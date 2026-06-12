@@ -2,7 +2,7 @@
 Step 1 Trainer: SchNet Baseline with Adam.
 
 Standard gradient descent training for molecular property prediction.
-Supports regression (RMSE/MAE) and classification (AUC).
+Supports regression (RMSE) and classification (AUC).
 """
 
 import os
@@ -139,7 +139,6 @@ class Step1Trainer:
 
         if self.task_type == 'regression':
             metrics['rmse'] = float(np.sqrt(np.mean((preds - targets) ** 2)))
-            metrics['mae'] = float(np.mean(np.abs(preds - targets)))
         else:
             try:
                 metrics['auc'] = float(roc_auc_score(targets, preds))
@@ -162,103 +161,20 @@ class Step1Trainer:
     # Main loop
     # ------------------------------------------------------------------
 
-    def _print_hyperparameters(self, train_loader: DataLoader):
-        """Print all hyperparameters used in this training run."""
-        cfg = self.config
-        tcfg = cfg.get('training', {})
-        scfg = cfg.get('schnet', {})
-        dcfg = cfg.get('data', {})
-        ccfg = cfg.get('conformer', {})
-        ecfg = cfg.get('experiment', {})
-        print("\n" + "=" * 70)
-        print("STEP 1 HYPERPARAMETERS")
-        print("=" * 70)
-
-        # --- Global Settings ---
-        print(f"\n  --- Global Settings ---")
-        print(f"  {'dataset_name':<30s}: {cfg.get('dataset_name', 'N/A')}")
-        print(f"  {'random_seed_train':<30s}: {cfg.get('random_seed_train', 'N/A')}")
-        print(f"  {'gpu':<30s}: {cfg.get('gpu', 'N/A')}")
-
-        # --- Experiment ---
-        print(f"\n  --- Experiment ---")
-        print(f"  {'output_dir':<30s}: {ecfg.get('output_dir', 'N/A')}")
-        print(f"  {'log_level':<30s}: {ecfg.get('log_level', 'N/A')}")
-        print(f"  {'verbose':<30s}: {ecfg.get('verbose', False)}")
-
-        # --- Dataset ---
-        print(f"\n  --- Dataset ---")
-        print(f"  {'name':<30s}: {cfg['dataset']['name']}")
-        print(f"  {'file':<30s}: {cfg['dataset'].get('file', 'N/A')}")
-        print(f"  {'smiles_column':<30s}: {cfg['dataset'].get('smiles_column', 'N/A')}")
-        print(f"  {'target_column':<30s}: {cfg['dataset'].get('target_column', 'N/A')}")
-        print(f"  {'task_type':<30s}: {cfg['dataset']['task_type']}")
-        print(f"  {'metric':<30s}: {cfg['dataset'].get('metric', 'rmse')}")
-
-        # --- Data / Splitting ---
-        print(f"\n  --- Data / Splitting ---")
-        print(f"  {'raw_dir':<30s}: {dcfg.get('raw_dir', 'N/A')}")
-        print(f"  {'processed_dir':<30s}: {dcfg.get('processed_dir', 'N/A')}")
-        print(f"  {'split_ratio':<30s}: {dcfg.get('split_ratio', 'N/A')}")
-        print(f"  {'split_method':<30s}: {dcfg.get('split_method', 'N/A')}")
-        print(f"  {'random_seed_split':<30s}: {dcfg.get('random_seed_split', 'N/A')}")
-
-        # --- Conformer Generation ---
-        print(f"\n  --- Conformer Generation ---")
-        print(f"  {'num_conformers':<30s}: {ccfg.get('num_conformers', 1)}")
-        print(f"  {'max_attempts':<30s}: {ccfg.get('max_attempts', 500)}")
-        print(f"  {'prune_rms_thresh':<30s}: {ccfg.get('prune_rms_thresh', 0.0)}")
-        print(f"  {'use_random_coords':<30s}: {ccfg.get('use_random_coords', False)}")
-        print(f"  {'optimize_mmff':<30s}: {ccfg.get('optimize_mmff', True)}")
-        print(f"  {'random_seed_gen':<30s}: {ccfg.get('random_seed_gen', 42)}")
-
-        # --- SchNet Model ---
-        print(f"\n  --- Model (SchNet) ---")
-        print(f"  {'n_atom_basis (hidden)':<30s}: {scfg.get('n_atom_basis', 128)}")
-        print(f"  {'n_interactions':<30s}: {scfg.get('n_interactions', 6)}")
-        print(f"  {'n_rbf (gaussians)':<30s}: {scfg.get('n_rbf', 50)}")
-        print(f"  {'n_filters':<30s}: {scfg.get('n_filters', 128)}")
-        print(f"  {'cutoff (A)':<30s}: {scfg.get('cutoff', 10.0)}")
-        print(f"  {'atomref':<30s}: {scfg.get('atomref', None)}")
-        print(f"  {'Total params':<30s}: {self.model.num_params:,}")
-        print(f"  {'Trainable params':<30s}: {self.model.num_trainable_params:,}")
-
-        # --- Training (Adam) ---
-        print(f"\n  --- Training (Adam) ---")
-        print(f"  {'Optimizer':<30s}: Adam")
-        print(f"  {'epochs':<30s}: {self.epochs}")
-        print(f"  {'batch_size':<30s}: {tcfg.get('batch_size', 32)}")
-        print(f"  {'learning_rate':<30s}: {tcfg.get('learning_rate', 5e-4)}")
-        print(f"  {'weight_decay':<30s}: {tcfg.get('weight_decay', 1e-5)}")
-        print(f"  {'scheduler':<30s}: {tcfg.get('scheduler', 'reduce_on_plateau')}")
-        print(f"  {'scheduler_patience':<30s}: {tcfg.get('scheduler_patience', 25)}")
-        print(f"  {'scheduler_factor':<30s}: {tcfg.get('scheduler_factor', 0.5)}")
-        print(f"  {'early_stopping_patience':<30s}: {self.patience}")
-        print(f"  {'gradient_clip':<30s}: {self.gradient_clip}")
-        print(f"  {'save_checkpoints':<30s}: {tcfg.get('save_checkpoints', True)}")
-        print(f"  {'Loss function':<30s}: "
-              f"{'BCELoss' if self.task_type == 'classification' else 'MSELoss'}")
-
-        # --- Data Stats ---
-        print(f"\n  --- Data Stats ---")
-        print(f"  {'Train samples':<30s}: {len(train_loader.dataset)}")
-        print(f"  {'Train batches':<30s}: {len(train_loader)}")
-
-        print("=" * 70)
-
     def train(
         self,
         train_loader: DataLoader,
         valid_loader: DataLoader,
         test_loader: Optional[DataLoader] = None,
     ) -> Dict[str, Any]:
-        self._print_hyperparameters(train_loader)
+        print(f"Model: {self.model.num_params:,} params | "
+              f"Optimizer: Adam | epochs={self.epochs} | "
+              f"batch_size={self.config['training'].get('batch_size', 32)}")
 
         # Initial evaluation (before any training)
         init_metrics = self.evaluate(valid_loader)
         if self.task_type == 'regression':
-            print(f"Initial  | val_rmse={init_metrics['rmse']:.4f}, "
-                  f"val_mae={init_metrics['mae']:.4f}")
+            print(f"Initial  | val_rmse={init_metrics['rmse']:.4f}")
         else:
             print(f"Initial  | val_auc={init_metrics.get('auc', 0):.4f}")
         print("-" * 70)
@@ -298,7 +214,6 @@ class Step1Trainer:
             }
             if self.task_type == 'regression':
                 record['val_rmse'] = val_metrics['rmse']
-                record['val_mae'] = val_metrics['mae']
             else:
                 record['val_auc'] = val_metrics.get('auc', 0.0)
             self.history.append(record)
@@ -310,7 +225,6 @@ class Step1Trainer:
                         f"Epoch {epoch:3d} | "
                         f"train_loss={train_metrics['loss']:.4f} | "
                         f"val_rmse={val_metrics['rmse']:.4f} | "
-                        f"val_mae={val_metrics['mae']:.4f} | "
                         f"lr={self.optimizer.param_groups[0]['lr']:.2e} | "
                         f"{elapsed:.1f}s"
                     )
@@ -334,13 +248,20 @@ class Step1Trainer:
         if self.best_state is not None:
             self.model.load_state_dict(self.best_state)
 
+        # Best validation score (regression: best val RMSE; classification: best AUC)
+        if self.task_type == 'regression':
+            print(f"\nBest val RMSE: {self.best_val_metric:.4f} "
+                  f"(epoch {self.best_epoch})")
+        else:
+            print(f"\nBest val AUC: {-self.best_val_metric:.4f} "
+                  f"(epoch {self.best_epoch})")
+
         test_metrics = {}
         if test_loader is not None:
             test_metrics = self.evaluate(test_loader)
-            print(f"\nTest Results (best epoch {self.best_epoch}):")
+            print(f"Test (best epoch {self.best_epoch}):")
             if self.task_type == 'regression':
                 print(f"  RMSE: {test_metrics['rmse']:.4f}")
-                print(f"  MAE:  {test_metrics['mae']:.4f}")
             else:
                 print(f"  AUC:  {test_metrics.get('auc', 0):.4f}")
 
