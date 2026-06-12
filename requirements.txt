@@ -29,5 +29,6 @@ tqdm>=4.65.0
 # Plotting
 matplotlib>=3.7.0
 
-# GP (already installed)
-# evogp==0.1.0
+# GP — EvoGP (GPU genetic programming). Bắt buộc cho các thí nghiệm sau (step GP).
+# Server conan_es đã có sẵn; local cài thêm để smoke test khớp môi trường.
+evogp
