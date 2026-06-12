@@ -81,18 +81,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- Feature ---
     f = p.add_argument_group("Feature")
-    f.add_argument("-K", "--num-conformers", type=int, default=8, dest="K",
+    f.add_argument("-K", "--num-conformers", type=int, default=10, dest="K",
                    help="Số conformer/phân tử cho GP head.")
     f.add_argument("--num-2d", type=int, default=8, dest="num_2d",
                    help="Số descriptor 2D chọn theo |corr| target trên TRAIN (5–15).")
 
     # --- GP ---
     gp_ = p.add_argument_group("GP head (DEAP)")
-    gp_.add_argument("--num-emb", type=int, default=7, dest="num_emb")
+    gp_.add_argument("--num-emb", type=int, default=8, dest="num_emb")
     gp_.add_argument("--num-desc3d", type=int, default=2, dest="num_desc3d")
     gp_.add_argument("--d", type=int, default=16, help="Số chiều mỗi subspace embedding.")
-    gp_.add_argument("--pop", type=int, default=300, dest="pop")
-    gp_.add_argument("--generations", type=int, default=100)
+    gp_.add_argument("--pop", type=int, default=1000, dest="pop",
+                     help="Cỡ quần thể KHỞI TẠO (đa dạng ban đầu).")
+    gp_.add_argument("--mu", type=int, default=300,
+                     help="(μ+λ): số cha mẹ giữ lại mỗi thế hệ.")
+    gp_.add_argument("--lam", "--lambda", type=int, default=300, dest="lam",
+                     help="(μ+λ): số con sinh ra mỗi thế hệ.")
+    gp_.add_argument("--generations", type=int, default=200)
     gp_.add_argument("--warmup", type=int, default=0,
                      help="0 = joint ngay; >0 = w thế hệ đầu chỉ tiến hóa L1.")
     gp_.add_argument("--cxpb", type=float, default=0.7)
@@ -258,9 +263,9 @@ def run_one_seed(args, seed_split: int, device: torch.device, run_dir: str) -> f
 
     gcfg = GPConfig(
         K=args.K, num_emb=args.num_emb, num_desc3d=args.num_desc3d, d=args.d,
-        num_2d=args.num_2d, pop_size=args.pop, generations=args.generations,
-        cxpb=args.cxpb, mutpb=args.mutpb, seed_prob=args.seed_prob,
-        warmup=args.warmup, seed=args.seed_train,
+        num_2d=args.num_2d, pop_size=args.pop, mu=args.mu, lam=args.lam,
+        generations=args.generations, cxpb=args.cxpb, mutpb=args.mutpb,
+        seed_prob=args.seed_prob, warmup=args.warmup, seed=args.seed_train,
     )
     res = run_gp(cache, gcfg, verbose=True)
     print(f"  [GP] seed {seed_split}: test RMSE = {res.test_rmse:.4f} "

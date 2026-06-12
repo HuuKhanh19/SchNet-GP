@@ -87,13 +87,15 @@ def _add_funcs(pset: gp.PrimitiveSet, names: List[str]) -> None:
 
 @dataclass
 class GPConfig:
-    K: int = 8
-    num_emb: int = 7
-    num_desc3d: int = 2
+    K: int = 10
+    num_emb: int = 8
+    num_desc3d: int = 2         # q = num_emb + num_desc3d = 10
     d: int = 16                 # số chiều mỗi subspace embedding
-    num_2d: int = 8
-    pop_size: int = 300
-    generations: int = 100
+    num_2d: int = 8             # ∈ [5,15], chọn theo |corr| target trên TRAIN
+    pop_size: int = 1000        # cỡ quần thể KHỞI TẠO (đa dạng ban đầu)
+    generations: int = 200
+    mu: int = 300               # (μ+λ): số cha mẹ giữ lại mỗi thế hệ
+    lam: int = 300              # (μ+λ): số con sinh ra mỗi thế hệ
     cxpb: float = 0.7
     mutpb: float = 0.2
     tourn_fitness_size: int = 5
@@ -434,8 +436,9 @@ def export_formula(ind, cfg: GPConfig, layout: Layout,
         "config": {
             "K": cfg.K, "num_emb": cfg.num_emb, "num_desc3d": cfg.num_desc3d,
             "d": cfg.d, "num_2d": cfg.num_2d, "pop_size": cfg.pop_size,
-            "generations": cfg.generations, "warmup": cfg.warmup,
-            "cxpb": cfg.cxpb, "mutpb": cfg.mutpb, "seed": cfg.seed,
+            "generations": cfg.generations, "mu": cfg.mu, "lam": cfg.lam,
+            "warmup": cfg.warmup, "cxpb": cfg.cxpb, "mutpb": cfg.mutpb,
+            "seed": cfg.seed,
         },
         "note": ("Forward: L1 nén embedding-subspace/desc3d -> v_j; L2 gom v -> s_i "
                  "(bin theo hạng energy tăng dần); L3 [s_0..s_{K-1}]+desc2d -> pred "
@@ -511,7 +514,7 @@ def run_gp(cache: Dict[str, object], cfg: GPConfig, verbose: bool = True) -> GPR
     best_ind = hof[0]
     history = []
 
-    mu, lam = cfg.pop_size, cfg.pop_size
+    mu, lam = cfg.mu, cfg.lam
     for gen in range(1, cfg.generations + 1):
         warm = gen <= cfg.warmup
         allowed = _allowed_layers(warm)
