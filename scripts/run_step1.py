@@ -8,15 +8,16 @@ Ví dụ:
     # SchNet gốc, ESOL, 1 split seed
     python scripts/run_step1.py --dataset esol --seed-split 0
 
-    # Quét 5 split seed (bash):
-    for s in 0 1 2 3 4; do python scripts/run_step1.py --dataset esol --seed-split $s; done
+    # Quét 5 split seed trong 1 lệnh -> in RMSE trung bình ± std
+    python scripts/run_step1.py --dataset esol --seed-split 0 1 2 3 4
 
-    # Mở rộng K=10 conformer, chạy CPU, không lưu output
-    python scripts/run_step1.py --dataset esol --num-conformers 10 --gpu -1 --no-save
+    # Mở rộng K=10 conformer, lưu output, chạy deterministic
+    python scripts/run_step1.py --dataset esol --num-conformers 10 --save --deterministic
 """
 
 import argparse
 import os
+import statistics
 import sys
 import time
 
@@ -62,8 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seed-train", type=int, default=0, dest="seed_train",
                    help="Seed cho khởi tạo model + thứ tự batch. Cố định cho cả "
                         "5 split seed để chỉ thay đổi cách chia dữ liệu.")
-    s.add_argument("--seed-split", type=int, default=0, dest="seed_split",
-                   help="Seed chia scaffold split. Quét 0..4 rồi lấy RMSE trung bình.")
+    s.add_argument("--seed-split", type=int, nargs="+", default=[0],
+                   dest="seed_split",
+                   help="Seed chia split. Có thể truyền nhiều seed trong 1 lệnh "
+                        "(vd. --seed-split 0 1 2 3 4) -> chạy lần lượt rồi in RMSE "
+                        "trung bình ± std.")
     s.add_argument("--seed-gen", type=int, default=42, dest="seed_gen",
                    help="Seed sinh conformer (RDKit ETKDGv3).")
 
@@ -233,30 +237,56 @@ def print_overrides(parser: argparse.ArgumentParser, args: argparse.Namespace):
         print("Hyper: tất cả default")
 
 
+def _metric_of(test_metrics: dict):
+    """Lấy (tên_metric, giá_trị) chính từ test_metrics."""
+    if "rmse" in test_metrics:
+        return "RMSE", test_metrics["rmse"]
+    if "auc" in test_metrics:
+        return "AUC", test_metrics["auc"]
+    return None, None
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    config = build_config(args)
     print_overrides(parser, args)
 
     # Device
-    gpu = config["gpu"]
-    if torch.cuda.is_available() and gpu >= 0:
-        device = torch.device(f"cuda:{gpu}")
-        print(f"Using GPU {gpu}: {torch.cuda.get_device_name(device)}")
+    if torch.cuda.is_available() and args.gpu >= 0:
+        device = torch.device(f"cuda:{args.gpu}")
+        print(f"Using GPU {args.gpu}: {torch.cuda.get_device_name(device)}")
     else:
         device = torch.device("cpu")
         print("Using CPU")
 
-    results = run_step1(config, device)
+    seeds = args.seed_split  # luôn là list (nargs='+')
+    dataset_name = args.dataset
+    scores = {}        # seed -> giá trị metric
+    metric_name = None
 
-    # Summary
-    tm = results.get("test_metrics", {})
-    dataset_name = config["dataset_name"]
-    if "rmse" in tm:
-        print(f"\n{dataset_name}: RMSE={tm['rmse']:.4f}")
-    elif "auc" in tm:
-        print(f"\n{dataset_name}: AUC={tm['auc']:.4f}")
+    for i, seed in enumerate(seeds):
+        config = build_config(args)
+        config["data"]["random_seed_split"] = seed
+        if len(seeds) > 1:
+            print(f"\n{'#'*60}\n# split seed {seed} ({i+1}/{len(seeds)})\n{'#'*60}")
+        results = run_step1(config, device)
+        name, val = _metric_of(results.get("test_metrics", {}))
+        if val is not None:
+            scores[seed] = val
+            metric_name = name
+            print(f"\n{dataset_name} (seed {seed}): {name}={val:.4f}")
+
+    # Tổng kết trung bình khi quét nhiều seed
+    if len(seeds) > 1 and scores:
+        vals = list(scores.values())
+        mean = statistics.mean(vals)
+        std = statistics.stdev(vals) if len(vals) > 1 else 0.0
+        print(f"\n{'='*60}")
+        print(f"Tổng kết {len(vals)} seed — {dataset_name}:")
+        for s, v in scores.items():
+            print(f"  seed {s}: {metric_name}={v:.4f}")
+        print(f"  Trung bình {metric_name} = {mean:.4f} ± {std:.4f}")
+        print(f"{'='*60}")
 
 
 if __name__ == "__main__":

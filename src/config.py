@@ -41,6 +41,12 @@ def build_config(args) -> dict:
             f"Dataset không hợp lệ: '{args.dataset}'. Chọn từ: {list(DATASETS)}"
         )
 
+    # --seed-split có thể là list (quét nhiều seed) -> lấy 1 scalar; vòng lặp
+    # ngoài (run_step1.main) sẽ ghi đè field này cho từng seed.
+    seed_split = args.seed_split
+    if isinstance(seed_split, (list, tuple)):
+        seed_split = seed_split[0]
+
     return {
         # --- Global ---
         "dataset_name": args.dataset,
@@ -65,7 +71,7 @@ def build_config(args) -> dict:
             "processed_dir": args.processed_dir,
             "split_ratio": [0.81, 0.09, 0.10],  # chỉ để hiển thị (test=0.1, valid=0.1*0.9)
             "split_method": args.split_method,
-            "random_seed_split": args.seed_split,
+            "random_seed_split": seed_split,
         },
 
         # --- Conformer ---

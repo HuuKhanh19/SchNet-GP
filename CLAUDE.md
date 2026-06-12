@@ -25,11 +25,10 @@
 
 ## Cách chạy (argparse, không còn Hydra)
 - Config qua `argparse` trong `scripts/run_step1.py` (registry dataset + lắp config ở `src/config.py`). Xem `python scripts/run_step1.py -h` để biết hết hyper + note.
-- SchNet gốc = mặc định (K=1 conformer, cutoff=10). Quét 5 split seed lấy RMSE trung bình.
-  Server là Windows PowerShell -> KHÔNG dùng `for...do...done` của bash, dùng:
-  ```powershell
-  foreach ($s in 0..4) { python scripts/run_step1.py --dataset esol --seed-split $s }
+- SchNet gốc = mặc định (K=1 conformer, cutoff=10). Quét 5 split seed + in RMSE
+  trung bình ± std chỉ bằng MỘT lệnh (truyền nhiều seed cho `--seed-split`):
   ```
-  (bash/Mac tương đương: `for s in 0 1 2 3 4; do python scripts/run_step1.py --dataset esol --seed-split $s; done`)
+  python scripts/run_step1.py --dataset esol --seed-split 0 1 2 3 4
+  ```
 - Default: KHÔNG lưu output và KHÔNG deterministic. Cờ hữu ích: `--gpu <0|1|-1>`, `--save` (ghi checkpoint + results.json vào `experiments/`), `--deterministic` (lặp lại được, chậm hơn), `--num-conformers K`, `--cutoff`.
 - Cache split + conformer ở `data/processed/<ds>/<split_method>/seed_<seed>/...` (đã key theo split_method).
