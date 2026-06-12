@@ -161,6 +161,7 @@ class SchNet(nn.Module):
         cutoff: float = 10.0,
         max_num_neighbors: int = 32,
         readout: str = 'add',
+        conf_readout: str = 'mean',
         scale: Optional[float] = None,
         task_type: str = "regression",
     ):
@@ -184,7 +185,12 @@ class SchNet(nn.Module):
         self.distance_expansion = GaussianSmearing(0.0, cutoff, num_gaussians)
 
         # Readout aggregation
+        #   atom -> conformer: 'add' (sum atomic contributions, original SchNet)
+        #   conformer -> molecule: 'mean' (ensemble average, invariant to K)
+        self.readout_name = readout
+        self.conf_readout_name = conf_readout
         self.readout = aggr_resolver(readout)
+        self.conf_readout = aggr_resolver(conf_readout)
 
         # Interaction blocks
         self.interactions = ModuleList([
@@ -235,11 +241,10 @@ class SchNet(nn.Module):
         edge_index, edge_weight = self.interaction_graph(pos, atom_to_conf)
         edge_attr = self.distance_expansion(edge_weight)
 
-        # 3. Interaction blocks (residual)
+        # 3. Interaction blocks (residual) -- original SchNet, no dropout
         for interaction in self.interactions:
-            # h = h + interaction(h, edge_index, edge_weight, edge_attr)
-            h = h + F.dropout(interaction(h, edge_index, edge_weight, edge_attr), 0.3)
-        
+            h = h + interaction(h, edge_index, edge_weight, edge_attr)
+
 
         # Step 3 hook: return hidden atom embeddings (H-dim) before output net
         if return_atom_emb_only:
@@ -252,8 +257,8 @@ class SchNet(nn.Module):
         # h shape: (total_atoms, 1)
 
         # 5. Hierarchical readout: atom -> conformer -> molecule
-        conf_out = self.readout(h, atom_to_conf, dim=0)       # (num_confs, 1)
-        mol_out = self.readout(conf_out, conf_to_mol, dim=0)  # (batch_size, 1)
+        conf_out = self.readout(h, atom_to_conf, dim=0)            # (num_confs, 1)
+        mol_out = self.conf_readout(conf_out, conf_to_mol, dim=0)  # (batch_size, 1)
 
         # 6. Squeeze to scalar
         out = mol_out.squeeze(-1)  # (batch_size,)
@@ -296,11 +301,13 @@ class SchNet(nn.Module):
                          num_conformers: int = 1):
         """Initialize lin2 bias so initial prediction ~ mean(target).
 
-        With readout='add' at both levels, prediction is:
-            pred ~ K * N_atoms * lin2.bias
-        where K = num_conformers, N_atoms = atoms per molecule.
+        Atom-level readout is 'add', so each conformer prediction is
+        ~ N_atoms * lin2.bias. The conformer-level readout determines the
+        K factor:
+            conf_readout='add'  -> pred ~ K * N_atoms * lin2.bias
+            conf_readout='mean' -> pred ~     N_atoms * lin2.bias  (K cancels)
 
-        So we set: lin2.bias = mean_target / (K * mean_n_atoms)
+        So we set: lin2.bias = mean_target / (conf_factor * mean_n_atoms)
 
         Also scales lin1 and lin2 weights small so the learned part
         starts near zero, letting the bias dominate initially.
@@ -310,7 +317,8 @@ class SchNet(nn.Module):
             mean_n_atoms: Mean number of atoms per molecule in training set.
             num_conformers: Number of conformers per molecule (K).
         """
-        divisor = max(mean_n_atoms * num_conformers, 1.0)
+        conf_factor = num_conformers if self.conf_readout_name == 'add' else 1.0
+        divisor = max(mean_n_atoms * conf_factor, 1.0)
         bias_val = mean_target / divisor
 
         with torch.no_grad():
@@ -322,7 +330,7 @@ class SchNet(nn.Module):
 
         print(f"  Output bias init: lin2.bias={bias_val:.6f} "
               f"(mean_target={mean_target:.4f}, mean_n_atoms={mean_n_atoms:.1f}, "
-              f"K={num_conformers})")
+              f"K={num_conformers}, conf_readout={self.conf_readout_name})")
 
     def __repr__(self) -> str:
         return (
@@ -350,6 +358,7 @@ def build_schnet_model(config: Dict) -> SchNet:
         cutoff=schnet_cfg.get('cutoff', 10.0),
         max_num_neighbors=32,
         readout='add',
+        conf_readout=schnet_cfg.get('conf_readout', 'mean'),
         scale=None,
         task_type=config['dataset']['task_type'],
     )

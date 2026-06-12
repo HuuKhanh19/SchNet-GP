@@ -80,6 +80,10 @@ schnet:
   cutoff: 5.0
   n_filters: 128
   atomref: null
+  # Aggregation over the K conformers of a molecule:
+  #   'mean' = ensemble average (invariant to how many conformers embedded)
+  #   'add'  = sum (prediction scales with conformer count)
+  conf_readout: "mean"
 # ___ Training (Step 1 _ Adam baseline) ______________________________________
 training:
   epochs: 300
