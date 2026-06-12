@@ -29,5 +29,8 @@ tqdm>=4.65.0
 # Plotting
 matplotlib>=3.7.0
 
+# GP head: multi-tree symbolic regression trên embedding SchNet đã freeze
+deap>=1.4
+
 # GP (already installed)
 # evogp==0.1.0

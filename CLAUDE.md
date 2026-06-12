@@ -32,3 +32,20 @@
   ```
 - Default: KHÔNG lưu output và KHÔNG deterministic. Cờ hữu ích: `--gpu <0|1|-1>`, `--save` (ghi checkpoint + results.json vào `experiments/`), `--deterministic` (lặp lại được, chậm hơn), `--num-conformers K`, `--cutoff`.
 - Cache split + conformer ở `data/processed/<ds>/<split_method>/seed_<seed>/...` (đã key theo split_method).
+
+## GP head (SchNet freeze 1-conf -> DEAP multi-tree GP)
+- Code ở `src/gp/` (`features.py` = extract+cache, `gp_head.py` = DEAP GP, `descriptors.py`
+  = RDKit 2D/3D). Runner: `scripts/run_gp.py` (xem `-h`). Cần `deap` (đã thêm vào requirements;
+  env `schnet_cpu` đã cài; server `conan_es` cần `pip install deap`).
+- Một lệnh/seed: train encoder SchNet K=1 (freeze) -> extract conf-emb (mean-pool atom->conf,
+  128) + desc2d/desc3d/energy trên K conformer (sort theo energy = routing) -> standardize theo
+  train -> DEAP GP head. Quét nhiều seed in mean ± std, so mốc baseline 0.8994 ± 0.0946.
+  ```
+  python scripts/run_gp.py --dataset esol --seed-split 0 1 2 3 4 --gpu 0
+  ```
+- Feature cache key theo (ds, split, seed, K) ở `.../seed_<seed>/gp_K<K>/features.pkl`. Lần đầu
+  train encoder + extract (cần GPU); tinh chỉnh hyper GP sau đó DÙNG LẠI cache (bỏ qua encoder),
+  chỉ truyền `--force-extract` khi muốn extract lại.
+- Hyper GP chính: `-K 8`, `--num-emb 7 --num-desc3d 2` (q=9), `--d 16`, `--num-2d 8`,
+  `--pop 300 --generations 100`, `--warmup 0` (>0 = w gen đầu chỉ tiến hóa L1). Energy/standardize
+  /denormalize đều seed được; routing dùng thứ tự energy đã sort sẵn lúc extract.
