@@ -1,0 +1,81 @@
+# =============================================================================
+# Config GP head (Phase 2 + Phase 3) — SchNet-GP
+# -----------------------------------------------------------------------------
+# Mọi cờ + hyperparam ở đây; override qua CLI dạng `--set key.subkey=value`
+# (xem scripts/run_gp.py). Seed hoá MỌI randomness: split, lấy mẫu subspace, GP,
+# torch. Mục tiêu: vượt baseline SchNet ESOL RMSE = 0.8994 ± 0.0946 (5 seed),
+# dùng ĐÚNG split + seed của baseline để so apple-to-apple.
+# =============================================================================
+
+# --- Dataset & split (PHẢI khớp baseline để so sánh) ---
+dataset: esol
+split_method: random_scaffold     # giống baseline; KHÔNG đổi
+seeds: [0, 1, 2, 3, 4]            # 5 split seed của baseline 0.8994
+seed_train: 0                     # cố định cho cả 5 (giống baseline)
+raw_dir: data/raw
+processed_dir: data/processed
+
+# --- Encoder frozen (Cờ 1: encoder_conformers) ---
+encoder:
+  # Chạy lưới trên cả hai option encoder; mỗi option = 1 checkpoint frozen.
+  conformers: [single, multi]     # single = train K=1; multi = train K conf, mean readout
+  k_multi: 10                     # K cho encoder 'multi'
+  # Checkpoint frozen lưu deterministic: <ckpt_dir>/<dataset>/<single|multi>/seed_<s>.pt
+  ckpt_dir: pretrained
+  # Hyper train encoder (tái dùng Step1Trainer; mặc định giống baseline).
+  epochs: 300
+  batch_size: 32
+  learning_rate: 0.001
+  cutoff: 10.0
+
+# --- Phase 2: extract + cache embedding ---
+# EXTRACT luôn chạy trên cả K conformer ở cả hai option encoder (task quy định).
+extract:
+  k: 10                           # số conformer/phân tử để extract (energy-ranked)
+  # readout atom->conf cho embedding: dùng đúng self.readout của encoder ('add').
+  cache_dir: experiments/gp_cache # key theo (encoder_conformers, seed, split, k)
+
+# --- Subspace cây feature (CỐ ĐỊNH, không evolve) ---
+# q = num_emb_trees + num_desc3d_trees cây feature mỗi bin.
+subspace:
+  num_emb_trees: 7                # 6–8: số slot embedding
+  num_desc3d_trees: 2             # 1–3: số slot 3D-descriptor
+  emb_dim: 20                     # d: số chiều mỗi slot embedding (16–24), random từ 128
+  emb_overlap: true               # slot độc lập -> CHO PHÉP chồng lấn chiều (task quy định)
+  # Mỗi slot desc-3D gắn một tập 3D descriptor (xem descriptors.desc3d).
+
+# --- Descriptor (RDKit) ---
+descriptors:
+  # 2D mức phân tử (bất biến conformer) — chọn num_2d theo |corr| với target TRÊN TRAIN.
+  pool_2d: [MolWt, MolLogP, TPSA, NumHDonors, NumHAcceptors, NumRotatableBonds,
+            NumAromaticRings, FractionCSP3, NumHeteroatoms, RingCount,
+            NumSaturatedRings, LabuteASA, BalabanJ, HallKierAlpha]
+  num_2d: 10                      # 5–15: số descriptor 2D giữ lại (chọn trên train)
+  # 3D mức conformer (cho slot desc-3D).
+  desc3d: [RadiusOfGyration, Asphericity, PMI1, PMI2, PMI3, NPR1, NPR2,
+           InertialShapeFactor, Eccentricity, SpherocityIndex]
+
+# --- Cờ 2: tree_sharing ---
+gp:
+  tree_sharing: [none, features, all]   # chạy cả 3 -> 3 x 2 encoder = 6 cell
+  # Operators (configurable). protected-div + sqrt/log an toàn xử lý ở fitness.py.
+  operators: [add, sub, mul, pdiv, abs, square, sqrt, tanh]
+  ephemeral: [-1.0, 1.0]          # khoảng ephemeral constant
+  population: 500
+  generations: 100
+  cx_prob: 0.7
+  mut_prob: 0.2
+  tournament_size: 5
+  init_min_depth: 1
+  init_max_depth: 3
+  max_height: 8                   # giới hạn chiều cao cây (chống bloat)
+  parsimony_coef: 0.001           # phạt theo tổng kích thước genotype (số node)
+  hall_of_fame: 1
+
+# --- Đánh giá & log ---
+eval:
+  metrics: [rmse, mae, r2]        # trên test; báo mean ± std qua 5 seed
+  csv: experiments/gp_results.csv # 1 dòng / run
+  # Bảng chung sẽ gồm: GBM(2D-descriptor), SchNet-e2e (0.8994), 6 cell GP.
+  baseline_rmse: 0.8994
+  baseline_rmse_std: 0.0946

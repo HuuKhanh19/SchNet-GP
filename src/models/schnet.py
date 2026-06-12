@@ -296,6 +296,35 @@ class SchNet(nn.Module):
             out = self.forward(inputs, return_embedding=True)
         return out['mol_embedding']
 
+    @torch.no_grad()
+    def extract_conf_embeddings(self, inputs: Dict[str, Tensor]) -> Tensor:
+        """Trích embedding mức conformer cho GP head (Phase 2), encoder ĐÓNG BĂNG.
+
+        Chạy embedding + N interaction block để lấy hidden atom embeddings
+        h (N_atoms, hidden) — KHÔNG đi qua output net (lin1/lin2/denormalize) — rồi
+        pool atom->conformer đúng bằng self.readout của encoder:
+
+            conf_emb = readout(h, _idx_atom_to_conf, dim=0)  -> (num_confs, hidden)
+
+        Khác hẳn get_embedding() (trả prediction scalar mức phân tử). Đây là nguồn
+        embedding để cache cho GP head; gọi dưới no_grad + eval (encoder frozen).
+
+        Args:
+            inputs: dict batch như forward() nhận (xem collate_multi_conformer);
+                    có thể là 1 phân tử (K conformer) hoặc cả batch nhiều phân tử.
+
+        Returns:
+            Tensor (num_confs, hidden_channels) — thứ tự conformer giữ nguyên theo
+            _idx_atom_to_conf (đã energy-rank từ dataset). Detached, cùng device model.
+        """
+        was_training = self.training
+        self.eval()
+        h = self.forward(inputs, return_atom_emb_only=True)['atom_embeddings']
+        conf_emb = self.readout(h, inputs['_idx_atom_to_conf'], dim=0)
+        if was_training:
+            self.train()
+        return conf_emb.detach()
+
     @property
     def embedding_dim(self) -> int:
         return self.hidden_channels

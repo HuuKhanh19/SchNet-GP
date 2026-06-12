@@ -208,6 +208,10 @@ class SchNetMolDataset(Dataset):
 
         self.atomic_numbers = []
         self.positions = []
+        # Energy (kcal/mol, ΔE so với conformer thấp nhất của mỗi phân tử) theo
+        # ĐÚNG thứ tự positions (đã sort tăng dần). Dùng cho energy-routing của GP
+        # head; lưu thẳng vào cache để minh bạch + tái lập (positions[i] = hạng i).
+        self.energies = []
 
         if cache_path and os.path.exists(cache_path):
             print(f"  Loading conformer cache: {cache_path}")
@@ -215,6 +219,8 @@ class SchNetMolDataset(Dataset):
                 cache = pickle.load(f)
             self.atomic_numbers = cache["atomic_numbers"]
             self.positions = cache["positions"]
+            # Backward-compat: cache cũ (trước khi thêm energy) không có key này.
+            self.energies = cache.get("energies", [None] * len(self.atomic_numbers))
         else:
             self._generate_conformers()
             if cache_path:
@@ -222,7 +228,8 @@ class SchNetMolDataset(Dataset):
                 with open(cache_path, "wb") as f:
                     pickle.dump(
                         {"atomic_numbers": self.atomic_numbers,
-                         "positions": self.positions},
+                         "positions": self.positions,
+                         "energies": self.energies},
                         f,
                     )
                 print(f"  Saved conformer cache: {cache_path}")
@@ -257,6 +264,7 @@ class SchNetMolDataset(Dataset):
             ):
                 self.atomic_numbers.append(None)
                 self.positions.append(None)
+                self.energies.append(None)
             else:
                 z = np.array(
                     [pt.GetAtomicNumber(s) for s in atoms_list[0]],
@@ -280,15 +288,19 @@ class SchNetMolDataset(Dataset):
                 if len(valid_coords) == 0:
                     self.atomic_numbers.append(None)
                     self.positions.append(None)
+                    self.energies.append(None)
                 else:
                     # Sort conformers by energy (ascending)
-                    # x0 = lowest energy conformer, x_{K-1} = highest
+                    # x0 = lowest energy conformer, x_{K-1} = highest.
+                    # kind='stable': tiebreak theo thứ tự sinh (index) khi năng lượng
+                    # bằng nhau -> routing energy-rank của GP head tái lập được.
                     energy_arr = np.array(valid_energies, dtype=np.float32)
-                    sort_order = np.argsort(energy_arr)
+                    sort_order = np.argsort(energy_arr, kind='stable')
                     sorted_coords = [valid_coords[j] for j in sort_order]
  
                     self.atomic_numbers.append(z)
                     self.positions.append(np.stack(sorted_coords, axis=0))
+                    self.energies.append(energy_arr[sort_order])
  
             if (i + 1) % 100 == 0:
                 print(f"    Conformer generation: {i+1}/{len(self.smiles)}")
@@ -306,6 +318,7 @@ class SchNetMolDataset(Dataset):
             self.targets = self.targets[valid_mask]
             self.atomic_numbers = [z for z, v in zip(self.atomic_numbers, valid_mask) if v]
             self.positions = [p for p, v in zip(self.positions, valid_mask) if v]
+            self.energies = [e for e, v in zip(self.energies, valid_mask) if v]
 
     def __len__(self):
         return len(self.smiles)

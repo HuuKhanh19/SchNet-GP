@@ -23,12 +23,14 @@ rdkit>=2023.03.1
 ase>=3.22.0
 
 # Config & logging
-# (config qua argparse chuẩn — không còn dùng hydra/omegaconf)
+# (config qua argparse chuẩn — không còn dùng hydra/omegaconf; GP head dùng YAML)
 tqdm>=4.65.0
+pyyaml>=6.0          # config GP head (configs/gp.yaml) + override CLI
 
 # Plotting
 matplotlib>=3.7.0
 
-# GP — EvoGP (GPU genetic programming). Bắt buộc cho các thí nghiệm sau (step GP).
-# Server conan_es đã có sẵn; local cài thêm để smoke test khớp môi trường.
-evogp
+# GP head
+# - DEAP: multi-tree genetic programming (Phase 3 GP head: feature trees + combiner
+#   + global tree; cá thể = list cây, custom eval phân tầng; genotype size theo cờ).
+deap>=1.4.0
