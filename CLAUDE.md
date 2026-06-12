@@ -22,3 +22,12 @@
 2. Chạy trên server (người dùng làm trong terminal server, hoặc nhờ Claude Code qua ssh):
    `git pull` rồi chạy bằng python của env conan_es, ghi log ra `logs/<ten>.log`.
 3. Kéo log về Mac bằng scp để phân tích.
+
+## Cách chạy (argparse, không còn Hydra)
+- Config qua `argparse` trong `scripts/run_step1.py` (registry dataset + lắp config ở `src/config.py`). Xem `python scripts/run_step1.py -h` để biết hết hyper + note.
+- SchNet gốc = mặc định (K=1 conformer, cutoff=10). Quét 5 split seed lấy RMSE trung bình:
+  ```bash
+  for s in 0 1 2 3 4; do python scripts/run_step1.py --dataset esol --seed-split $s; done
+  ```
+- Cờ hữu ích: `--gpu <0|1|-1>`, `--no-deterministic`, `--num-conformers K`, `--cutoff`, `--no-save` (chạy thử, không ghi `experiments/`).
+- Cache split + conformer ở `data/processed/<ds>/<split_method>/seed_<seed>/...` (đã key theo split_method).

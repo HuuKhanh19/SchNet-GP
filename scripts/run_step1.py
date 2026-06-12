@@ -1,29 +1,162 @@
 #!/usr/bin/env python
-"""Step 1: SchNet Baseline (Adam optimizer)."""
+"""Step 1: SchNet Baseline (Adam optimizer).
 
+Chạy SchNet gốc (K=1 conformer) hoặc bản mở rộng K conformer cho dự đoán tính
+chất phân tử. Cấu hình qua argparse — xem `python scripts/run_step1.py -h`.
+
+Ví dụ:
+    # SchNet gốc, ESOL, 1 split seed
+    python scripts/run_step1.py --dataset esol --seed-split 0
+
+    # Quét 5 split seed (bash):
+    for s in 0 1 2 3 4; do python scripts/run_step1.py --dataset esol --seed-split $s; done
+
+    # Mở rộng K=10 conformer, chạy CPU, không lưu output
+    python scripts/run_step1.py --dataset esol --num-conformers 10 --gpu -1 --no-save
+"""
+
+import argparse
 import os
 import sys
-import torch
-import hydra
-import pandas as pd
 import time
-from omegaconf import DictConfig, OmegaConf
+
+import pandas as pd
+import torch
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
+from src.config import DATASETS, build_config
 from src.data.data_loader import prepare_dataset, save_splits, create_dataloaders
 from src.models.schnet import build_schnet_model
 from src.trainers.step1_trainer import Step1Trainer
 from src.utils.utils import seed_everything
 
 
-def run_step1(config: dict, device: torch.device):
-    dataset_name = config['dataset']['name']
+# =============================================================================
+# Argument parser
+# =============================================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Step 1: SchNet baseline (Adam).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # --- Global ---
+    g = p.add_argument_group("Global")
+    g.add_argument("--dataset", default="esol", choices=list(DATASETS),
+                   help="Tên dataset (định nghĩa trong src/config.py).")
+    g.add_argument("--gpu", type=int, default=0,
+                   help="Chỉ số GPU dùng. Đặt -1 để chạy CPU. "
+                        "Trên server: card 0 thường rảnh, card 1 hay bận.")
+    g.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Bật thuật toán CUDA deterministic để cùng seed -> cùng "
+                        "kết quả (scatter/atomic của message passing vốn "
+                        "non-deterministic). Tắt (--no-deterministic) chạy nhanh "
+                        "hơn chút nhưng kết quả lệch nhẹ giữa các lần.")
+
+    # --- Seeds ---
+    s = p.add_argument_group("Seeds")
+    s.add_argument("--seed-train", type=int, default=0, dest="seed_train",
+                   help="Seed cho khởi tạo model + thứ tự batch. Cố định cho cả "
+                        "5 split seed để chỉ thay đổi cách chia dữ liệu.")
+    s.add_argument("--seed-split", type=int, default=0, dest="seed_split",
+                   help="Seed chia scaffold split. Quét 0..4 rồi lấy RMSE trung bình.")
+    s.add_argument("--seed-gen", type=int, default=42, dest="seed_gen",
+                   help="Seed sinh conformer (RDKit ETKDGv3).")
+
+    # --- Data / split ---
+    d = p.add_argument_group("Data / Split")
+    d.add_argument("--split-method", default="random_scaffold",
+                   choices=["random_scaffold", "random"], dest="split_method",
+                   help="Cách chia train/valid/test (~81/9/10). scaffold khó hơn "
+                        "random; kết quả public của project này dùng scaffold.")
+    d.add_argument("--raw-dir", default="data/raw", dest="raw_dir",
+                   help="Thư mục chứa CSV gốc.")
+    d.add_argument("--processed-dir", default="data/processed", dest="processed_dir",
+                   help="Thư mục cache split + conformer.")
+
+    # --- Conformer ---
+    c = p.add_argument_group("Conformer")
+    c.add_argument("--num-conformers", "-K", type=int, default=1,
+                   dest="num_conformers",
+                   help="Số conformer mỗi phân tử (K). K=1 = SchNet gốc; K>1 = mở rộng.")
+    c.add_argument("--max-attempts", type=int, default=500, dest="max_attempts",
+                   help="Số vòng embed tối đa của RDKit.")
+    c.add_argument("--prune-rms-thresh", type=float, default=0.0,
+                   dest="prune_rms_thresh",
+                   help="Ngưỡng RMS để loại conformer trùng (0 = không loại).")
+    c.add_argument("--use-random-coords", action=argparse.BooleanOptionalAction,
+                   default=False, dest="use_random_coords",
+                   help="Cho phép RDKit dùng toạ độ ngẫu nhiên khi embed thất bại.")
+    c.add_argument("--optimize-mmff", action=argparse.BooleanOptionalAction,
+                   default=True, dest="optimize_mmff",
+                   help="Tối ưu hoá hình học bằng MMFF/UFF (dùng để sắp xếp theo năng lượng).")
+
+    # --- Model (SchNet) ---
+    m = p.add_argument_group("Model (SchNet)")
+    m.add_argument("--n-atom-basis", type=int, default=128, dest="n_atom_basis",
+                   help="Số chiều embedding ẩn (hidden_channels).")
+    m.add_argument("--n-interactions", type=int, default=6, dest="n_interactions",
+                   help="Số interaction block.")
+    m.add_argument("--n-rbf", type=int, default=50, dest="n_rbf",
+                   help="Số hàm Gaussian khai triển khoảng cách.")
+    m.add_argument("--n-filters", type=int, default=128, dest="n_filters",
+                   help="Số filter trong CFConv.")
+    m.add_argument("--cutoff", type=float, default=10.0,
+                   help="Bán kính cutoff (Å) dựng đồ thị. SchNet gốc dùng 10.0 "
+                        "(cutoff=5.0 cho RMSE kém hơn rõ rệt).")
+    m.add_argument("--conf-readout", default="mean", choices=["mean", "add"],
+                   dest="conf_readout",
+                   help="Gộp K conformer: 'mean' = trung bình ensemble (bất biến số "
+                        "conformer); 'add' = tổng (prediction phụ thuộc số conformer). "
+                        "Với K=1 hai cái như nhau.")
+
+    # --- Training ---
+    t = p.add_argument_group("Training (Adam)")
+    t.add_argument("--epochs", type=int, default=300, help="Số epoch tối đa.")
+    t.add_argument("--batch-size", type=int, default=32, dest="batch_size",
+                   help="Kích thước batch (số phân tử).")
+    t.add_argument("--learning-rate", "--lr", type=float, default=1e-3,
+                   dest="learning_rate", help="Learning rate của Adam.")
+    t.add_argument("--weight-decay", type=float, default=1e-5, dest="weight_decay",
+                   help="Weight decay (L2) của Adam.")
+    t.add_argument("--scheduler-patience", type=int, default=25,
+                   dest="scheduler_patience",
+                   help="Patience của ReduceLROnPlateau (epoch không cải thiện -> giảm LR).")
+    t.add_argument("--scheduler-factor", type=float, default=0.5,
+                   dest="scheduler_factor", help="Hệ số nhân LR khi giảm.")
+    t.add_argument("--early-stopping-patience", type=int, default=100,
+                   dest="early_stopping_patience",
+                   help="Số epoch không cải thiện val thì dừng sớm.")
+    t.add_argument("--gradient-clip", type=float, default=1.0, dest="gradient_clip",
+                   help="Ngưỡng clip norm gradient (<=0 = tắt).")
+
+    # --- Experiment / output ---
+    e = p.add_argument_group("Experiment")
+    e.add_argument("--output-dir", default="experiments", dest="output_dir",
+                   help="Thư mục gốc lưu kết quả.")
+    e.add_argument("--save", action=argparse.BooleanOptionalAction, default=True,
+                   help="Có lưu checkpoint + results.json + config vào experiments/ "
+                        "hay không. --no-save chỉ chạy & in metric (best model giữ "
+                        "trong RAM, không ghi đĩa) — tiện chạy thử nhanh.")
+    e.add_argument("--verbose", action="store_true",
+                   help="In thêm shape của từng tham số model.")
+    return p
+
+
+# =============================================================================
+# Run
+# =============================================================================
+
+def run_step1(config: dict, device: torch.device) -> dict:
+    dataset_name = config["dataset_name"]
 
     # -- Seed everything FIRST --
-    train_seed = config['random_seed_train']
-    deterministic = config.get('deterministic', True)
+    train_seed = config["random_seed_train"]
+    deterministic = config.get("deterministic", True)
     seed_everything(train_seed, deterministic=deterministic)
     print(f"random_seed_train={train_seed}, deterministic={deterministic}")
 
@@ -31,16 +164,17 @@ def run_step1(config: dict, device: torch.device):
     print(f"Step 1: SchNet Baseline - {dataset_name.upper()}")
     print(f"{'='*60}")
 
-    # -- Load or prepare data --
-    base_dir = config['data']['processed_dir']
-    split_seed = config['data']['random_seed_split']
-    ds_dir = f"{base_dir}/{dataset_name}/seed_{split_seed}"
+    # -- Load or prepare data (cache key gồm cả split_method) --
+    base_dir = config["data"]["processed_dir"]
+    split_method = config["data"]["split_method"]
+    split_seed = config["data"]["random_seed_split"]
+    ds_dir = f"{base_dir}/{dataset_name}/{split_method}/seed_{split_seed}"
 
-    if os.path.exists(os.path.join(ds_dir, 'train.csv')):
+    if os.path.exists(os.path.join(ds_dir, "train.csv")):
         print(f"Loading preprocessed data from {ds_dir}")
-        train_df = pd.read_csv(os.path.join(ds_dir, 'train.csv'))
-        valid_df = pd.read_csv(os.path.join(ds_dir, 'valid.csv'))
-        test_df = pd.read_csv(os.path.join(ds_dir, 'test.csv'))
+        train_df = pd.read_csv(os.path.join(ds_dir, "train.csv"))
+        valid_df = pd.read_csv(os.path.join(ds_dir, "valid.csv"))
+        test_df = pd.read_csv(os.path.join(ds_dir, "test.csv"))
     else:
         print("Preprocessed data not found, running preprocessing...")
         train_df, valid_df, test_df = prepare_dataset(config)
@@ -56,17 +190,17 @@ def run_step1(config: dict, device: torch.device):
     model = build_schnet_model(config)
 
     # -- Standardize regression targets from training data --
-    # Net predicts (target - mean) / std; forward denormalizes. Canonical SchNet
-    # way to handle target scale (keeps gradients well scaled across datasets).
-    if config['dataset']['task_type'] == 'regression':
-        mean_target = float(train_df['target'].mean())
-        std_target = float(train_df['target'].std())
+    # Net dự đoán (target - mean) / std; forward denormalize. Cách canonical SchNet
+    # xử lý scale target (giữ gradient ổn định giữa các dataset).
+    if config["dataset"]["task_type"] == "regression":
+        mean_target = float(train_df["target"].mean())
+        std_target = float(train_df["target"].std())
         model.set_normalization(mean_target, std_target)
 
-    print(f"Model: {model.num_params:,} params, {model.num_trainable_params:,} trainable")
+    print(f"Model: {model.num_params:,} params, "
+          f"{model.num_trainable_params:,} trainable")
 
-    # Optional verbose parameter dump
-    if config.get('experiment', {}).get('verbose', False):
+    if config["experiment"].get("verbose", False):
         print("\n" + "=" * 60)
         print("MODEL PARAMETER SHAPES")
         print("=" * 60)
@@ -78,36 +212,28 @@ def run_step1(config: dict, device: torch.device):
     # -- Train --
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     exp_dir = os.path.join(
-        config['experiment']['output_dir'],
-        f"step1/{dataset_name}/seed_{split_seed}/{timestamp}",
+        config["experiment"]["output_dir"],
+        f"step1/{dataset_name}/{split_method}/seed_{split_seed}/{timestamp}",
     )
 
     trainer = Step1Trainer(
         model=model, config=config, device=device, experiment_dir=exp_dir
     )
     results = trainer.train(train_loader, valid_loader, test_loader)
-    print(f"\nResults saved to: {exp_dir}")
+    if config["experiment"].get("save", True):
+        print(f"\nResults saved to: {exp_dir}")
     return results
 
 
-@hydra.main(version_base=None, config_path="../configs", config_name="base")
-def main(cfg: DictConfig):
-    os.chdir(hydra.utils.get_original_cwd())
-
-    # Resolve dataset
-    dataset_name = cfg.dataset_name
-    assert dataset_name in cfg.datasets, (
-        f"Unknown dataset: {dataset_name}. Choose from: {list(cfg.datasets.keys())}"
-    )
-
-    config = OmegaConf.to_container(cfg, resolve=True)
-    config['dataset'] = config['datasets'][dataset_name]
+def main():
+    args = build_parser().parse_args()
+    config = build_config(args)
 
     # Device
-    gpu = cfg.get('gpu', 0)
+    gpu = config["gpu"]
     if torch.cuda.is_available() and gpu >= 0:
         device = torch.device(f"cuda:{gpu}")
-        print(f"Using GPU: {torch.cuda.get_device_name(device)}")
+        print(f"Using GPU {gpu}: {torch.cuda.get_device_name(device)}")
     else:
         device = torch.device("cpu")
         print("Using CPU")
@@ -115,10 +241,11 @@ def main(cfg: DictConfig):
     results = run_step1(config, device)
 
     # Summary
-    tm = results.get('test_metrics', {})
-    if 'rmse' in tm:
+    tm = results.get("test_metrics", {})
+    dataset_name = config["dataset_name"]
+    if "rmse" in tm:
         print(f"\n{dataset_name}: RMSE={tm['rmse']:.4f}, MAE={tm['mae']:.4f}")
-    elif 'auc' in tm:
+    elif "auc" in tm:
         print(f"\n{dataset_name}: AUC={tm['auc']:.4f}")
 
 

@@ -8,6 +8,7 @@ Supports regression (RMSE/MAE) and classification (AUC).
 import os
 import time
 import json
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,7 +33,12 @@ class Step1Trainer:
         self.config = config
         self.device = device
         self.experiment_dir = experiment_dir
-        os.makedirs(experiment_dir, exist_ok=True)
+        # Cờ lưu output ra đĩa (checkpoint + results.json). Nếu tắt, best model
+        # vẫn được giữ trong RAM để khôi phục lúc test.
+        self.save = config.get('experiment', {}).get('save', True)
+        if self.save:
+            os.makedirs(experiment_dir, exist_ok=True)
+        self.best_state = None
 
         self.task_type = config['dataset']['task_type']
         self.metric_name = config['dataset'].get('metric', 'rmse')
@@ -274,10 +280,10 @@ class Step1Trainer:
                 self.best_val_metric = val_score
                 self.best_epoch = epoch
                 self.no_improve_count = 0
-                torch.save(
-                    self.model.state_dict(),
-                    os.path.join(self.experiment_dir, 'best_model.pt'),
-                )
+                # Giữ best model trong RAM (tránh ghi đĩa mỗi epoch cải thiện).
+                self.best_state = copy.deepcopy({
+                    k: v.detach().cpu() for k, v in self.model.state_dict().items()
+                })
             else:
                 self.no_improve_count += 1
 
@@ -324,12 +330,9 @@ class Step1Trainer:
         total_time = time.time() - start_time
         print(f"\nTraining done in {total_time:.1f}s ({total_time/60:.1f}min)")
 
-        # Load best model and evaluate on test
-        best_path = os.path.join(self.experiment_dir, 'best_model.pt')
-        if os.path.exists(best_path):
-            self.model.load_state_dict(
-                torch.load(best_path, map_location=self.device, weights_only=True)
-            )
+        # Restore best model (từ RAM) rồi đánh giá trên test
+        if self.best_state is not None:
+            self.model.load_state_dict(self.best_state)
 
         test_metrics = {}
         if test_loader is not None:
@@ -341,7 +344,6 @@ class Step1Trainer:
             else:
                 print(f"  AUC:  {test_metrics.get('auc', 0):.4f}")
 
-        # Save results
         results = {
             'step': 1,
             'optimizer': 'Adam',
@@ -352,7 +354,13 @@ class Step1Trainer:
             'config': self.config,
             'history': self.history,
         }
-        with open(os.path.join(self.experiment_dir, 'results.json'), 'w') as f:
-            json.dump(results, f, indent=2, default=str)
+
+        # Lưu ra đĩa chỉ khi bật --save
+        if self.save:
+            if self.best_state is not None:
+                torch.save(self.best_state,
+                           os.path.join(self.experiment_dir, 'best_model.pt'))
+            with open(os.path.join(self.experiment_dir, 'results.json'), 'w') as f:
+                json.dump(results, f, indent=2, default=str)
 
         return results

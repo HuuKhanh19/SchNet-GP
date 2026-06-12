@@ -395,11 +395,16 @@ def create_dataloaders(
     """Create train/valid/test DataLoaders with conformer caching."""
     dataset_name = config['dataset']['name']
     seed = config['data']['random_seed_split']
+    split_method = config['data']['split_method']
     n_conf = config['conformer']['num_conformers']
 
+    # Cache key gồm split_method: split khác nhau -> thành phần train/valid/test
+    # khác nhau, nên không được dùng chung cache (bug cũ: đổi split_method mà
+    # kết quả không đổi vì load lại cache của split cũ).
     cache_dir = os.path.join(
         config['data']['processed_dir'],
         dataset_name,
+        split_method,
         f"seed_{seed}",
         f"{n_conf}_conformers",
     )
