@@ -9,7 +9,7 @@
   - GPU: 2× NVIDIA RTX 5070 Ti (16 GB mỗi card), driver 576.88, CUDA 12.9, PyTorch 2.8.0+cu129.
   - WDDM driver model. Chọn card qua `gpu=<0|1>` trong config (card 1 hay bận, card 0 thường rảnh).
   - Lưu ý reproducibility: seed thôi KHÔNG đủ trên GPU vì scatter-add/atomic của message
-    passing là non-deterministic. `deterministic: true` (mặc định) bật
+    passing là non-deterministic. Cờ `--deterministic` (mặc định TẮT) bật
     `torch.use_deterministic_algorithms` để các lần chạy cùng seed ra giống nhau (chậm hơn chút).
 - Nhánh làm việc: `khanh`. Mọi thay đổi nằm trên `khanh`, không commit vào `main`.
 
@@ -31,5 +31,5 @@
   foreach ($s in 0..4) { python scripts/run_step1.py --dataset esol --seed-split $s }
   ```
   (bash/Mac tương đương: `for s in 0 1 2 3 4; do python scripts/run_step1.py --dataset esol --seed-split $s; done`)
-- Cờ hữu ích: `--gpu <0|1|-1>`, `--no-deterministic`, `--num-conformers K`, `--cutoff`, `--no-save` (chạy thử, không ghi `experiments/`).
+- Default: KHÔNG lưu output và KHÔNG deterministic. Cờ hữu ích: `--gpu <0|1|-1>`, `--save` (ghi checkpoint + results.json vào `experiments/`), `--deterministic` (lặp lại được, chậm hơn), `--num-conformers K`, `--cutoff`.
 - Cache split + conformer ở `data/processed/<ds>/<split_method>/seed_<seed>/...` (đã key theo split_method).

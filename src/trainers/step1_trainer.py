@@ -220,12 +220,14 @@ class Step1Trainer:
 
             # Print progress every 5 epochs
             if epoch % 5 == 0 or epoch == 1:
+                lr = self.optimizer.param_groups[0]['lr']
                 if self.task_type == 'regression':
                     print(
                         f"Epoch {epoch:3d} | "
                         f"train_loss={train_metrics['loss']:.4f} | "
                         f"val_rmse={val_metrics['rmse']:.4f} | "
-                        f"lr={self.optimizer.param_groups[0]['lr']:.2e} | "
+                        f"best_val={self.best_val_metric:.4f}@ep{self.best_epoch} | "
+                        f"lr={lr:.2e} | "
                         f"{elapsed:.1f}s"
                     )
                 else:
@@ -233,7 +235,8 @@ class Step1Trainer:
                         f"Epoch {epoch:3d} | "
                         f"train_loss={train_metrics['loss']:.4f} | "
                         f"val_auc={val_metrics.get('auc', 0):.4f} | "
-                        f"lr={self.optimizer.param_groups[0]['lr']:.2e} | "
+                        f"best_val={-self.best_val_metric:.4f}@ep{self.best_epoch} | "
+                        f"lr={lr:.2e} | "
                         f"{elapsed:.1f}s"
                     )
 

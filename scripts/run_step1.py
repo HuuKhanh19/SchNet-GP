@@ -51,11 +51,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Chỉ số GPU dùng. Đặt -1 để chạy CPU. "
                         "Trên server: card 0 thường rảnh, card 1 hay bận.")
     g.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
-                   default=True,
+                   default=False,
                    help="Bật thuật toán CUDA deterministic để cùng seed -> cùng "
                         "kết quả (scatter/atomic của message passing vốn "
-                        "non-deterministic). Tắt (--no-deterministic) chạy nhanh "
-                        "hơn chút nhưng kết quả lệch nhẹ giữa các lần.")
+                        "non-deterministic). Mặc định TẮT (nhanh hơn, kết quả lệch "
+                        "nhẹ giữa các lần). Bật bằng --deterministic khi cần lặp lại.")
 
     # --- Seeds ---
     s = p.add_argument_group("Seeds")
@@ -138,10 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     e = p.add_argument_group("Experiment")
     e.add_argument("--output-dir", default="experiments", dest="output_dir",
                    help="Thư mục gốc lưu kết quả.")
-    e.add_argument("--save", action=argparse.BooleanOptionalAction, default=True,
+    e.add_argument("--save", action=argparse.BooleanOptionalAction, default=False,
                    help="Có lưu checkpoint + results.json + config vào experiments/ "
-                        "hay không. --no-save chỉ chạy & in metric (best model giữ "
-                        "trong RAM, không ghi đĩa) — tiện chạy thử nhanh.")
+                        "hay không. Mặc định KHÔNG lưu (chỉ chạy & in metric, best "
+                        "model giữ trong RAM). Bật bằng --save khi muốn giữ kết quả.")
     e.add_argument("--verbose", action="store_true",
                    help="In thêm shape của từng tham số model.")
     return p
