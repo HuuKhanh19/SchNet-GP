@@ -24,8 +24,9 @@ def run_step1(config: dict, device: torch.device):
 
     # -- Seed everything FIRST --
     train_seed = config['random_seed_train']
-    seed_everything(train_seed)
-    print(f"random_seed_train={train_seed}")
+    deterministic = config.get('deterministic', True)
+    seed_everything(train_seed, deterministic=deterministic)
+    print(f"random_seed_train={train_seed}, deterministic={deterministic}")
 
     print(f"\n{'='*60}")
     print(f"Step 1: SchNet Baseline - {dataset_name.upper()}")

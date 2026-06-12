@@ -14,6 +14,9 @@ hydra:
 dataset_name: esol
 random_seed_train: 0
 gpu: 1
+# Bật thuật toán CUDA deterministic để kết quả lặp lại được với cùng seed.
+# Đánh đổi: chậm hơn một chút. Tắt (false) nếu cần tốc độ và chấp nhận variance.
+deterministic: true
 
 # ___ Experiment ______________________________________________________________
 experiment:
