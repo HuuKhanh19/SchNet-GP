@@ -6,7 +6,6 @@ import sys
 import torch
 import hydra
 import pandas as pd
-import numpy as np
 import time
 from omegaconf import DictConfig, OmegaConf
 
@@ -56,15 +55,13 @@ def run_step1(config: dict, device: torch.device):
     # -- Build model --
     model = build_schnet_model(config)
 
-    # -- Initialize output bias from training data --
-    # This makes initial prediction ~ mean(target), so initial RMSE ~ std(target)
-    mean_target = float(train_df['target'].mean())
-    # Compute mean number of atoms from the dataset
-    mean_n_atoms = float(np.mean([
-        len(z) for z in train_loader.dataset.atomic_numbers
-    ]))
-    model.init_output_bias(mean_target, mean_n_atoms,
-                           num_conformers=config['conformer']['num_conformers'])
+    # -- Standardize regression targets from training data --
+    # Net predicts (target - mean) / std; forward denormalizes. Canonical SchNet
+    # way to handle target scale (keeps gradients well scaled across datasets).
+    if config['dataset']['task_type'] == 'regression':
+        mean_target = float(train_df['target'].mean())
+        std_target = float(train_df['target'].std())
+        model.set_normalization(mean_target, std_target)
 
     print(f"Model: {model.num_params:,} params, {model.num_trainable_params:,} trainable")
 

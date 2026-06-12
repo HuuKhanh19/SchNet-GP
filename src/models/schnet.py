@@ -203,6 +203,14 @@ class SchNet(nn.Module):
         self.act = ShiftedSoftplus()
         self.lin2 = Linear(hidden_channels // 2, 1)
 
+        # Target standardization (canonical SchNet / PyG): the net predicts
+        # normalized targets; the molecule output is denormalized as
+        # out * std + mean. Defaults (0, 1) are a no-op; set via
+        # set_normalization() from the training-set statistics. Registered as
+        # buffers so they persist in the checkpoint and move with the device.
+        self.register_buffer('target_mean', torch.tensor(0.0))
+        self.register_buffer('target_std', torch.tensor(1.0))
+
         # Classification head
         if task_type == "classification":
             self.sigmoid = nn.Sigmoid()
@@ -268,6 +276,9 @@ class SchNet(nn.Module):
 
         if self.task_type == "classification":
             out = self.sigmoid(out)
+        else:
+            # Denormalize: net predicts standardized target -> original units.
+            out = out * self.target_std + self.target_mean
 
         result = {"prediction": out}
 
@@ -297,40 +308,33 @@ class SchNet(nn.Module):
     def num_trainable_params(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def init_output_bias(self, mean_target: float, mean_n_atoms: float,
-                         num_conformers: int = 1):
-        """Initialize lin2 bias so initial prediction ~ mean(target).
+    def set_normalization(self, mean: float, std: float):
+        """Set target standardization stats (regression only).
 
-        Atom-level readout is 'add', so each conformer prediction is
-        ~ N_atoms * lin2.bias. The conformer-level readout determines the
-        K factor:
-            conf_readout='add'  -> pred ~ K * N_atoms * lin2.bias
-            conf_readout='mean' -> pred ~     N_atoms * lin2.bias  (K cancels)
+        The network is trained to predict the standardized target
+        (target - mean) / std; the forward pass denormalizes the molecule
+        output as out * std + mean. This is the canonical SchNet way to handle
+        target scale (vs an ad-hoc output-bias init) and keeps gradients well
+        scaled across datasets with different target ranges.
 
-        So we set: lin2.bias = mean_target / (conf_factor * mean_n_atoms)
-
-        Also scales lin1 and lin2 weights small so the learned part
-        starts near zero, letting the bias dominate initially.
+        The final output layer (lin2) is zero-initialized here so the initial
+        molecule output is 0 -> denormalized prediction = mean(target), i.e.
+        initial RMSE = std(target). This is a standard "zero last layer" init
+        that avoids the early instability of a large untrained summed output;
+        the rest of the network keeps its standard xavier init.
 
         Args:
-            mean_target: Mean of training targets.
-            mean_n_atoms: Mean number of atoms per molecule in training set.
-            num_conformers: Number of conformers per molecule (K).
+            mean: Mean of the training-set targets.
+            std:  Std of the training-set targets (clamped to >= 1e-6).
         """
-        conf_factor = num_conformers if self.conf_readout_name == 'add' else 1.0
-        divisor = max(mean_n_atoms * conf_factor, 1.0)
-        bias_val = mean_target / divisor
-
+        std = max(float(std), 1e-6)
         with torch.no_grad():
-            # Scale weights very small so initial output ~ bias only
-            self.lin1.weight.data *= 0.01
-            self.lin1.bias.data.fill_(0)
-            self.lin2.weight.data *= 0.01
-            self.lin2.bias.data.fill_(bias_val)
-
-        print(f"  Output bias init: lin2.bias={bias_val:.6f} "
-              f"(mean_target={mean_target:.4f}, mean_n_atoms={mean_n_atoms:.1f}, "
-              f"K={num_conformers}, conf_readout={self.conf_readout_name})")
+            self.target_mean.fill_(float(mean))
+            self.target_std.fill_(std)
+            self.lin2.weight.data.zero_()
+            self.lin2.bias.data.zero_()
+        print(f"  Target standardization: mean={mean:.4f}, std={std:.4f} "
+              f"(lin2 zero-init -> initial pred = mean)")
 
     def __repr__(self) -> str:
         return (
