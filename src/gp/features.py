@@ -312,6 +312,14 @@ def feature_cache_dir(processed_dir: str, dataset: str, split_method: str,
                         f"seed_{seed}", f"gp_K{K}")
 
 
+def encoder_ckpt_dir(processed_dir: str, dataset: str, split_method: str,
+                     seed: int) -> str:
+    """Checkpoint encoder freeze key theo (ds, split, seed) — KHÔNG theo K vì encoder
+    train 1-conf độc lập với K của GP. Train MỘT lần, các run sau dùng lại."""
+    return os.path.join(processed_dir, dataset, split_method,
+                        f"seed_{seed}", "encoder_1conf")
+
+
 def build_feature_cache(
     model: torch.nn.Module,
     dfs: Dict[str, "pd.DataFrame"],   # noqa: F821  {'train','valid','test'}

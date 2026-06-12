@@ -405,7 +405,42 @@ class GPResult:
     val_rmse: float
     train_rmse: float
     best_individual: list
+    formula: dict = field(default_factory=dict)
     history: List[dict] = field(default_factory=list)
+
+
+def export_formula(ind, cfg: GPConfig, layout: Layout,
+                   subspaces: List[np.ndarray], stats) -> dict:
+    """Serialize công thức học được (best individual) -> dict JSON-able.
+
+    Gồm biểu thức mọi cây theo vai trò, subspace embedding mỗi slot, tên descriptor,
+    và stats denormalize (để tái lập / diễn giải prediction về đơn vị gốc).
+    """
+    trees: Dict[str, str] = {}
+    for i in range(cfg.K):
+        for j in range(cfg.q):
+            role = "emb" if j < cfg.num_emb else "desc3d"
+            trees[f"L1[bin{i}][slot{j}:{role}]"] = str(ind[layout.l1(i, j)])
+        trees[f"L2[bin{i}]"] = str(ind[layout.l2(i)])
+    trees["L3"] = str(ind[layout.idx_l3])
+    return {
+        "trees": trees,
+        "subspaces": {f"slot{j}": subspaces[j].tolist()
+                      for j in range(cfg.num_emb)},
+        "desc2d_names": list(stats.desc2d_names),
+        "desc3d_names": list(stats.desc3d_names),
+        "target_mean": float(stats.target_mean),
+        "target_std": float(stats.target_std),
+        "config": {
+            "K": cfg.K, "num_emb": cfg.num_emb, "num_desc3d": cfg.num_desc3d,
+            "d": cfg.d, "num_2d": cfg.num_2d, "pop_size": cfg.pop_size,
+            "generations": cfg.generations, "warmup": cfg.warmup,
+            "cxpb": cfg.cxpb, "mutpb": cfg.mutpb, "seed": cfg.seed,
+        },
+        "note": ("Forward: L1 nén embedding-subspace/desc3d -> v_j; L2 gom v -> s_i "
+                 "(bin theo hạng energy tăng dần); L3 [s_0..s_{K-1}]+desc2d -> pred "
+                 "(standardized). prediction_raw = pred * target_std + target_mean."),
+    }
 
 
 def run_gp(cache: Dict[str, object], cfg: GPConfig, verbose: bool = True) -> GPResult:
@@ -528,5 +563,6 @@ def run_gp(cache: Dict[str, object], cfg: GPConfig, verbose: bool = True) -> GPR
         val_rmse=val_std * ts,
         train_rmse=train_std * ts,
         best_individual=best_ind,
+        formula=export_formula(best_ind, cfg, layout, subspaces, stats),
         history=history,
     )
