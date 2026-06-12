@@ -164,8 +164,6 @@ class Step1Trainer:
         dcfg = cfg.get('data', {})
         ccfg = cfg.get('conformer', {})
         ecfg = cfg.get('experiment', {})
-        pcfg = cfg.get('pretrain', {})
-
         print("\n" + "=" * 70)
         print("STEP 1 HYPERPARAMETERS")
         print("=" * 70)
@@ -218,13 +216,6 @@ class Step1Trainer:
         print(f"  {'atomref':<30s}: {scfg.get('atomref', None)}")
         print(f"  {'Total params':<30s}: {self.model.num_params:,}")
         print(f"  {'Trainable params':<30s}: {self.model.num_trainable_params:,}")
-
-        # --- Pretrained Backbone ---
-        print(f"\n  --- Pretrained Backbone ---")
-        print(f"  {'use_qm9_pretrained':<30s}: {pcfg.get('use_qm9_pretrained', False)}")
-        if pcfg.get('use_qm9_pretrained', False):
-            print(f"  {'qm9_target':<30s}: {pcfg.get('qm9_target', 7)}")
-            print(f"  {'cache_dir':<30s}: {pcfg.get('cache_dir', 'pretrained')}")
 
         # --- Training (Adam) ---
         print(f"\n  --- Training (Adam) ---")
