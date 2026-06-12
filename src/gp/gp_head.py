@@ -94,8 +94,8 @@ class GPConfig:
     num_2d: int = 8             # ∈ [5,15], chọn theo |corr| target trên TRAIN
     pop_size: int = 1000        # cỡ quần thể KHỞI TẠO (đa dạng ban đầu)
     generations: int = 200
-    mu: int = 300               # (μ+λ): số cha mẹ giữ lại mỗi thế hệ
-    lam: int = 300              # (μ+λ): số con sinh ra mỗi thế hệ
+    mu: int = 1000              # (μ+λ): số cha mẹ giữ lại mỗi thế hệ
+    lam: int = 1000             # (μ+λ): số con sinh ra mỗi thế hệ
     cxpb: float = 0.7
     mutpb: float = 0.2
     tourn_fitness_size: int = 5

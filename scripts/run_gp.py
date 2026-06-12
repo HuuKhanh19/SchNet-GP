@@ -93,9 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     gp_.add_argument("--d", type=int, default=16, help="Số chiều mỗi subspace embedding.")
     gp_.add_argument("--pop", type=int, default=1000, dest="pop",
                      help="Cỡ quần thể KHỞI TẠO (đa dạng ban đầu).")
-    gp_.add_argument("--mu", type=int, default=300,
+    gp_.add_argument("--mu", type=int, default=1000,
                      help="(μ+λ): số cha mẹ giữ lại mỗi thế hệ.")
-    gp_.add_argument("--lam", "--lambda", type=int, default=300, dest="lam",
+    gp_.add_argument("--lam", "--lambda", type=int, default=1000, dest="lam",
                      help="(μ+λ): số con sinh ra mỗi thế hệ.")
     gp_.add_argument("--generations", type=int, default=200)
     gp_.add_argument("--warmup", type=int, default=0,

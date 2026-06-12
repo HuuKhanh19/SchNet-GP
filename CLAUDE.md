@@ -47,6 +47,6 @@
   train encoder + extract (cần GPU); tinh chỉnh hyper GP sau đó DÙNG LẠI cache (bỏ qua encoder),
   chỉ truyền `--force-extract` khi muốn extract lại.
 - Hyper GP chính (default): `-K 10`, `--num-emb 8 --num-desc3d 2` (q=10), `--d 16`, `--num-2d 8`,
-  `--pop 1000` (quần thể khởi tạo) `--mu 300 --lam 300` ((μ+λ) steady-state), `--generations 200`,
+  `--pop 1000` (quần thể khởi tạo) `--mu 1000 --lam 1000` ((μ+λ)), `--generations 200`,
   `--warmup 0` (>0 = w gen đầu chỉ tiến hóa L1). Energy/standardize/denormalize đều seed được;
   routing dùng thứ tự energy đã sort sẵn lúc extract.
