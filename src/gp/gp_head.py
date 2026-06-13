@@ -1,14 +1,15 @@
 """PHASE 3 — DEAP multi-tree GP head (no tree-sharing).
 
 Genotype = list các gp.PrimitiveTree, vai trò cố định theo vị trí:
-    [K x q cây L1] + [K cây L2] + [1 cây L3]
+    [K x q cây L1] + [K cây L2] + [1 cây L2d] + [1 cây L3]
 với q = num_emb + num_desc3d.
 
   - L1 (bin i, slot j): nén feature -> 1 scalar v_j.
       * slot embedding j: đọc d chiều subspace[j] của conf_emb (subspace CHUNG mọi bin).
       * slot desc3d:      đọc toàn bộ 3D descriptor của bin i.
   - L2 (bin i): gom q scalar v_1..v_q -> s_i.
-  - L3 (global): [s_0..s_{K-1}] + desc2d -> prediction.
+  - L2d (global): nén toàn bộ desc2d (mức phân tử) -> 1 scalar t.
+  - L3 (global): [s_0..s_{K-1}] + t -> prediction (KHÔNG còn thấy desc2d trực tiếp).
 
 Forward VECTORIZE qua numpy (không loop python theo phân tử). Routing: conformer đã
 được sort theo energy tăng dần ở khâu extract, nên trục K chính là hạng energy -> bin i
@@ -62,6 +63,7 @@ FUNCSET_L1 = ["add", "sub", "mul", "pdiv", "square", "psqrt",
               "abs", "neg", "tanh", "plog", "min", "max"]
 FUNCSET_L2 = ["add", "sub", "mul", "pdiv", "tanh"]
 FUNCSET_L3 = ["add", "sub", "mul", "pdiv", "tanh", "square", "max", "min"]
+FUNCSET_L2D = list(FUNCSET_L1)   # cây desc2d đọc raw -> tập hàm phong phú như L1
 
 
 def _erc():
@@ -104,6 +106,7 @@ class GPConfig:
     warmup: int = 0
     height_l1: int = 8
     height_l2: int = 6
+    height_l2d: int = 8         # cây desc2d riêng: cho phép sâu như L1 (đọc raw 2D)
     height_l3: int = 6
     init_l1: Tuple[int, int] = (2, 4)
     init_l23: Tuple[int, int] = (1, 3)
@@ -115,7 +118,7 @@ class GPConfig:
 
 
 # Layer tag
-L1, L2, L3 = 0, 1, 2
+L1, L2, L2D, L3 = 0, 1, 2, 3
 
 
 # =============================================================================
@@ -129,7 +132,9 @@ class Layout:
         self.cfg = cfg
         self.Kq = cfg.K * cfg.q
         self.n_l2 = cfg.K
-        self.total = self.Kq + cfg.K + 1
+        # [K·q L1] + [K L2] + [1 L2d] + [1 L3]
+        self.total = self.Kq + cfg.K + 2
+        self.idx_l2d = self.Kq + cfg.K
         self.idx_l3 = self.total - 1
 
     def l1(self, bin_i: int, slot_j: int) -> int:
@@ -143,6 +148,8 @@ class Layout:
             return L1
         if k < self.Kq + self.cfg.K:
             return L2
+        if k == self.idx_l2d:
+            return L2D
         return L3
 
     def positions(self, layer: int) -> List[int]:
@@ -150,6 +157,8 @@ class Layout:
             return list(range(self.Kq))
         if layer == L2:
             return list(range(self.Kq, self.Kq + self.cfg.K))
+        if layer == L2D:
+            return [self.idx_l2d]
         return [self.idx_l3]
 
 
@@ -179,10 +188,15 @@ class PSets:
         self.l2 = gp.PrimitiveSet("L2", cfg.q)
         self.l2.renameArguments(**{f"ARG{c}": f"v{c}" for c in range(cfg.q)})
         _add_funcs(self.l2, FUNCSET_L2)
-        # pset L3 (arity = K + num_2d): s_0..s_{K-1} + desc2d.
-        self.l3 = gp.PrimitiveSet("L3", cfg.K + cfg.num_2d)
+        # pset L2d (arity = num_2d): nén toàn bộ desc2d -> 1 scalar t. Hàm phong phú
+        # như L1 vì đọc descriptor 2D thô.
+        self.l2d = gp.PrimitiveSet("L2d", cfg.num_2d)
+        self.l2d.renameArguments(**{f"ARG{j}": f"m{j}" for j in range(cfg.num_2d)})
+        _add_funcs(self.l2d, FUNCSET_L2D)
+        # pset L3 (arity = K + 1): s_0..s_{K-1} + t (output cây desc2d).
+        self.l3 = gp.PrimitiveSet("L3", cfg.K + 1)
         names = {f"ARG{i}": f"s{i}" for i in range(cfg.K)}
-        names.update({f"ARG{cfg.K + j}": f"m{j}" for j in range(cfg.num_2d)})
+        names[f"ARG{cfg.K}"] = "t"
         self.l3.renameArguments(**names)
         _add_funcs(self.l3, FUNCSET_L3)
 
@@ -194,6 +208,7 @@ class PSets:
                     self.emb[j] if j < cfg.num_emb else self.desc3d
                 )
             self.by_pos[layout.l2(i)] = self.l2
+        self.by_pos[layout.idx_l2d] = self.l2d
         self.by_pos[layout.idx_l3] = self.l3
 
 
@@ -254,7 +269,11 @@ class Forward:
             f2 = self.compile(ind[lo.l2(i)], self.psets.l2)
             S[:, i] = _vec(f2(*[V[:, j] for j in range(cfg.q)]), N)
 
-        cols3 = [S[:, i] for i in range(cfg.K)] + [d2d[:, j] for j in range(d2d.shape[1])]
+        # L2d: nén toàn bộ desc2d -> t (1 scalar/phân tử).
+        f2d = self.compile(ind[lo.idx_l2d], self.psets.l2d)
+        t = _vec(f2d(*[d2d[:, j] for j in range(d2d.shape[1])]), N)
+
+        cols3 = [S[:, i] for i in range(cfg.K)] + [t]
         f3 = self.compile(ind[lo.idx_l3], self.psets.l3)
         pred = _vec(f3(*cols3), N)
         return pred
@@ -305,9 +324,15 @@ def _init_individual(cfg: GPConfig, layout: Layout, psets: PSets,
         else:
             expr = gp.genHalfAndHalf(psets.l2, min_=cfg.init_l23[0], max_=cfg.init_l23[1])
             trees[layout.l2(i)] = gp.PrimitiveTree(expr)
+    # L2d: cây desc2d riêng (đọc raw 2D như L1).
+    if seeded:
+        trees[layout.idx_l2d] = _mean_tree(psets.l2d)  # mean(desc2d...)
+    else:
+        expr = gp.genHalfAndHalf(psets.l2d, min_=cfg.init_l1[0], max_=cfg.init_l1[1])
+        trees[layout.idx_l2d] = gp.PrimitiveTree(expr)
     # L3
     if seeded:
-        trees[layout.idx_l3] = _mean_tree(psets.l3)  # mean(s_0..s_{K-1}, desc2d...)
+        trees[layout.idx_l3] = _mean_tree(psets.l3)  # mean(s_0..s_{K-1}, t)
     else:
         expr = gp.genHalfAndHalf(psets.l3, min_=cfg.init_l23[0], max_=cfg.init_l23[1])
         trees[layout.idx_l3] = gp.PrimitiveTree(expr)
@@ -318,12 +343,12 @@ def _init_individual(cfg: GPConfig, layout: Layout, psets: PSets,
 # Operators: crossover / mutation role-respecting + per-layer staticLimit
 # =============================================================================
 
-_LAYER_WEIGHTS = {L1: 0.5, L2: 0.3, L3: 0.2}
+_LAYER_WEIGHTS = {L1: 0.45, L2: 0.25, L2D: 0.15, L3: 0.15}
 
 
 def _pick_positions(layout: Layout, allowed: List[int], n_min=1, n_max=3) -> List[int]:
     """Rút 1–3 vị trí: chọn lớp theo trọng số rồi chọn vị trí trong lớp."""
-    layers = [l for l in (L1, L2, L3) if l in allowed]
+    layers = [l for l in (L1, L2, L2D, L3) if l in allowed]
     weights = [_LAYER_WEIGHTS[l] for l in layers]
     k = random.randint(n_min, min(n_max, layout.total))
     chosen = set()
@@ -339,7 +364,8 @@ def _pick_positions(layout: Layout, allowed: List[int], n_min=1, n_max=3) -> Lis
 def _height_limit(cfg: GPConfig, layout: Layout, k: int) -> int:
     layer = layout.layer_of(k)
     return (cfg.height_l1 if layer == L1 else
-            cfg.height_l2 if layer == L2 else cfg.height_l3)
+            cfg.height_l2 if layer == L2 else
+            cfg.height_l2d if layer == L2D else cfg.height_l3)
 
 
 class Operators:
@@ -397,7 +423,7 @@ def _ensure_creator():
 
 
 def _allowed_layers(warmup_active: bool) -> List[int]:
-    return [L1] if warmup_active else [L1, L2, L3]
+    return [L1] if warmup_active else [L1, L2, L2D, L3]
 
 
 @dataclass
@@ -424,6 +450,7 @@ def export_formula(ind, cfg: GPConfig, layout: Layout,
             role = "emb" if j < cfg.num_emb else "desc3d"
             trees[f"L1[bin{i}][slot{j}:{role}]"] = str(ind[layout.l1(i, j)])
         trees[f"L2[bin{i}]"] = str(ind[layout.l2(i)])
+    trees["L2d"] = str(ind[layout.idx_l2d])
     trees["L3"] = str(ind[layout.idx_l3])
     return {
         "trees": trees,
@@ -441,8 +468,9 @@ def export_formula(ind, cfg: GPConfig, layout: Layout,
             "seed": cfg.seed,
         },
         "note": ("Forward: L1 nén embedding-subspace/desc3d -> v_j; L2 gom v -> s_i "
-                 "(bin theo hạng energy tăng dần); L3 [s_0..s_{K-1}]+desc2d -> pred "
-                 "(standardized). prediction_raw = pred * target_std + target_mean."),
+                 "(bin theo hạng energy tăng dần); L2d nén desc2d -> t; "
+                 "L3 [s_0..s_{K-1}]+t -> pred (standardized). "
+                 "prediction_raw = pred * target_std + target_mean."),
     }
 
 

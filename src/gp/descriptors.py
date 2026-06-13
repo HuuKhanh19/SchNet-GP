@@ -17,18 +17,18 @@ from rdkit.Chem import AllChem, Crippen, Descriptors, Descriptors3D, rdMolDescri
 # --- 2D descriptor (mức phân tử) ---------------------------------------------
 # Mỗi entry: (tên, hàm(mol_no_h) -> float). Mol đã bỏ H (canonical 2D).
 DESC2D_FUNCS = [
-    ("MolWt", Descriptors.MolWt),
-    ("MolLogP", Crippen.MolLogP),
-    ("TPSA", rdMolDescriptors.CalcTPSA),
-    ("NumHDonors", rdMolDescriptors.CalcNumHBD),
-    ("NumHAcceptors", rdMolDescriptors.CalcNumHBA),
-    ("NumRotatableBonds", rdMolDescriptors.CalcNumRotatableBonds),
-    ("NumAromaticRings", rdMolDescriptors.CalcNumAromaticRings),
-    ("FractionCSP3", rdMolDescriptors.CalcFractionCSP3),
-    ("NumRings", rdMolDescriptors.CalcNumRings),
-    ("NumHeteroatoms", rdMolDescriptors.CalcNumHeteroatoms),
-    ("LabuteASA", rdMolDescriptors.CalcLabuteASA),
-    ("NumHeavyAtoms", lambda m: float(m.GetNumHeavyAtoms())),
+    # ("MolWt", Descriptors.MolWt),
+    # ("MolLogP", Crippen.MolLogP),
+    # ("TPSA", rdMolDescriptors.CalcTPSA),
+    # ("NumHDonors", rdMolDescriptors.CalcNumHBD),
+    # ("NumHAcceptors", rdMolDescriptors.CalcNumHBA),
+    # ("NumRotatableBonds", rdMolDescriptors.CalcNumRotatableBonds),
+    # ("NumAromaticRings", rdMolDescriptors.CalcNumAromaticRings),
+    # ("FractionCSP3", rdMolDescriptors.CalcFractionCSP3),
+    # ("NumRings", rdMolDescriptors.CalcNumRings),
+    # ("NumHeteroatoms", rdMolDescriptors.CalcNumHeteroatoms),
+    # ("LabuteASA", rdMolDescriptors.CalcLabuteASA),
+    # ("NumHeavyAtoms", lambda m: float(m.GetNumHeavyAtoms())),
 ]
 DESC2D_NAMES: List[str] = [name for name, _ in DESC2D_FUNCS]
 
