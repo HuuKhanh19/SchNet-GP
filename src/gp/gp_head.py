@@ -49,14 +49,30 @@ def p_sin(a): return np.sin(a)
 def p_cos(a): return np.cos(a)
 def p_tanh(a): return np.tanh(a)
 
+# Non-diff ops (Nhánh B — justify eggroll; backprop chết với những op này).
+def p_gt(a, b): return (np.asarray(a) > np.asarray(b)).astype(np.float64)
+def p_ifte(c, a, b): return np.where(np.asarray(c) > 0.0, a, b)
+def p_hmin(a, b): return np.minimum(a, b)
+def p_hmax(a, b): return np.maximum(a, b)
+def p_step(a): return (np.asarray(a) > 0.0).astype(np.float64)
 
-# Function set gọn (tránh exp không chặn).
+
+# name -> (callable numpy, arity).
 _OPS = {
     "add": (p_add, 2), "sub": (p_sub, 2), "mul": (p_mul, 2), "pdiv": (p_div, 2),
     "sin": (p_sin, 1), "cos": (p_cos, 1), "plog": (p_log, 1),
     "psqrt": (p_sqrt, 1), "tanh": (p_tanh, 1),
+    # non-diff:
+    "gt": (p_gt, 2), "ifte": (p_ifte, 3), "hmin": (p_hmin, 2),
+    "hmax": (p_hmax, 2), "step": (p_step, 1),
 }
-FUNCSET = list(_OPS.keys())
+FUNCSET_DIFF = ["add", "sub", "mul", "pdiv", "sin", "cos", "plog", "psqrt", "tanh"]
+FUNCSET_NONDIFF = FUNCSET_DIFF + ["gt", "ifte", "hmin", "hmax", "step"]
+FUNCSET = FUNCSET_DIFF  # mặc định (Exp 2 + Nhánh A)
+
+
+def funcset_list(name: str):
+    return {"diff": FUNCSET_DIFF, "nondiff": FUNCSET_NONDIFF}[name]
 
 
 def _erc():
@@ -83,6 +99,7 @@ class GPConfig:
     parsimony: float = 1e-3          # λ phạt số node
     ridge_alpha: float = 1.0         # α cố định trong evolution
     seed: int = 0
+    funcset: str = "diff"            # 'diff' (Exp2/Nhánh A) | 'nondiff' (Nhánh B)
 
     @property
     def block_dim(self) -> int:
@@ -104,10 +121,11 @@ def make_partition(cfg: GPConfig) -> List[np.ndarray]:
 def make_psets(cfg: GPConfig) -> List[gp.PrimitiveSet]:
     """q pset, cây j có arity = block_dim (đọc 16 dim khối j) + ERC riêng."""
     psets = []
+    fset = funcset_list(cfg.funcset)
     for j in range(cfg.q):
         ps = gp.PrimitiveSet(f"B{j}", cfg.block_dim)
         ps.renameArguments(**{f"ARG{c}": f"x{c}" for c in range(cfg.block_dim)})
-        for nm in FUNCSET:
+        for nm in fset:
             fn, ar = _OPS[nm]
             ps.addPrimitive(fn, ar, name=nm)
         ps.addEphemeralConstant(f"erc_{j}", _erc)
@@ -231,7 +249,7 @@ def _enforce_depth(ind, cfg: GPConfig):
 # =============================================================================
 
 def run_gp_head(emb_tr, t_tr, emb_va, t_va, emb_te, t_te, cfg: GPConfig,
-                verbose: bool = True) -> dict:
+                seed_individuals=None, verbose: bool = True) -> dict:
     """Tiến hóa q-tree GP head; chọn theo VAL RMSE (đơn vị target chuẩn hóa).
 
     target t_* đã standardize (zero-mean/unit-std bằng stats train) — denorm ở runner.
@@ -255,6 +273,11 @@ def run_gp_head(emb_tr, t_tr, emb_va, t_va, emb_te, t_te, cfg: GPConfig,
         return (tr_rmse + cfg.parsimony * _total_nodes(ind),)
 
     pop = tb.population(n=cfg.pop_size)
+    # Warm-start (slow-step Exp 3): gieo best individual cũ vào tối đa nửa quần thể.
+    if seed_individuals:
+        k = min(len(seed_individuals), cfg.pop_size // 2)
+        for i in range(k):
+            pop[i] = copy.deepcopy(seed_individuals[i % len(seed_individuals)])
     for ind in pop:
         ind.fitness.values = evaluate(ind)
 
