@@ -147,6 +147,23 @@ class Step1Trainer:
 
         return metrics
 
+    @torch.no_grad()
+    def predict(self, loader: DataLoader):
+        """Trả về (preds, targets) dạng np.ndarray theo đúng thứ tự dataset.
+
+        Dùng cho residual/delta-learning: cần prediction thô để cộng lại baseline
+        và tính diagnostic. Loader phải shuffle=False để thứ tự khớp dataset.smiles.
+        """
+        self.model.eval()
+        all_preds, all_targets = [], []
+        for batch in loader:
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            target = batch.pop('target')
+            pred = self.model(batch)['prediction']
+            all_preds.append(pred.cpu().numpy())
+            all_targets.append(target.cpu().numpy())
+        return np.concatenate(all_preds), np.concatenate(all_targets)
+
     def get_val_score(self, metrics: Dict[str, float]) -> float:
         """Get validation score (lower is better for early stopping).
         
