@@ -39,6 +39,7 @@ sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from run_step1 import build_parser, print_overrides
+from run_exp2_extract import find_checkpoint
 from src.config import build_config
 from src.data.data_loader import prepare_dataset, save_splits, create_dataloaders
 from src.models.schnet import build_schnet_model
@@ -224,13 +225,18 @@ def run_one_seed(args, device, seed):
     print(f"  Data: " + ", ".join(f"{s}={len(smiles[s])}" for s in batches) +
           f" | GBT-2D test RMSE={base_test_rmse:.4f}")
 
-    # Encoder warm-start từ checkpoint baseline.
+    # Encoder warm-start từ checkpoint baseline (per-seed!). --ckpt chỉ override khi
+    # chạy 1 seed; nhiều seed -> auto-find theo seed dưới --ckpt-root.
     model = build_schnet_model(config).to(device)
-    if args.ckpt and os.path.exists(args.ckpt):
-        model.load_state_dict(torch.load(args.ckpt, map_location=device, weights_only=True))
-        print(f"  Encoder checkpoint: {args.ckpt}")
+    ckpt = args.ckpt or find_checkpoint(args.ckpt_root, args.dataset, sm, seed)
+    if ckpt and os.path.exists(ckpt):
+        model.load_state_dict(torch.load(ckpt, map_location=device, weights_only=True))
+        print(f"  Encoder checkpoint: {ckpt}")
     elif not args.allow_random:
-        raise FileNotFoundError("Cần --ckpt (baseline) hoặc --allow-random (smoke).")
+        raise FileNotFoundError(
+            f"Không thấy checkpoint baseline cho seed {seed} dưới {args.ckpt_root}.\n"
+            f"  -> chạy baseline với --save, hoặc --ckpt <path> (1 seed), "
+            f"hoặc --allow-random (smoke).")
     else:
         print("  ⚠️  Encoder NGẪU NHIÊN (smoke test).")
 
@@ -363,7 +369,10 @@ def main():
     g.add_argument("--bp-lr", type=float, default=1e-3, dest="bp_lr")
     # IO
     g.add_argument("--exp0-dir", default="experiments/exp0_baseline2d", dest="exp0_dir")
-    g.add_argument("--ckpt", default=None, help="Checkpoint encoder baseline.")
+    g.add_argument("--ckpt", default=None,
+                   help="Checkpoint encoder cụ thể (override auto-find; chỉ dùng khi 1 seed).")
+    g.add_argument("--ckpt-root", default="experiments/step1", dest="ckpt_root",
+                   help="Auto-find best_model.pt per-seed: <root>/<ds>/<split>/seed_<seed>/*/.")
     g.add_argument("--allow-random", action="store_true", dest="allow_random")
     args = parser.parse_args()
     print_overrides(parser, args)
