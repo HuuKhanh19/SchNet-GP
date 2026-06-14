@@ -29,5 +29,8 @@ tqdm>=4.65.0
 # Plotting
 matplotlib>=3.7.0
 
-# GP (already installed)
-# evogp==0.1.0
+# GP head (Exp 2): dùng DEAP, KHÔNG dùng EvoGP.
+#   EvoGP problem-centric/CUDA-tensorized -> KHÔNG cho ridge-in-the-loop fitness
+#   per-individual (gate 2 fail). DEAP cho phép multi-tree individual + ridge
+#   closed-form trong fitness (vectorize numpy, chạy CPU). Xem src/gp/gp_head.py.
+deap>=1.4
