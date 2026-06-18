@@ -336,6 +336,19 @@ class SchNet(nn.Module):
         print(f"  Target standardization: mean={mean:.4f}, std={std:.4f} "
               f"(lin2 zero-init -> initial pred = mean)")
 
+    def zero_init_output(self):
+        """Zero-init output layer (lin2) cho CLASSIFICATION.
+
+        Output = sigmoid(sum_atoms(lin2(h))). Nếu lin2 giữ xavier-init, tổng trên hàng
+        chục atom -> logit rất lớn -> sigmoid bão hoà -> BCELoss hết gradient -> training
+        sụp (AUC kẹt 0.5). Zero-init -> logit ban đầu = 0 -> sigmoid 0.5 -> BCE ~0.69,
+        gradient khỏe. Tương đương phần zero-init của set_normalization (regression).
+        """
+        with torch.no_grad():
+            self.lin2.weight.data.zero_()
+            self.lin2.bias.data.zero_()
+        print("  Classification: lin2 zero-init -> initial logit=0 (sigmoid=0.5)")
+
     def __repr__(self) -> str:
         return (
             f'{self.__class__.__name__}('

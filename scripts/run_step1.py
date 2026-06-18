@@ -205,6 +205,9 @@ def run_step1(config: dict, device: torch.device) -> dict:
         mean_target = float(train_df["target"].mean())
         std_target = float(train_df["target"].std())
         model.set_normalization(mean_target, std_target)
+    else:
+        # Classification: zero-init output -> logit 0 -> tránh sigmoid bão hoà/sụp BCE.
+        model.zero_init_output()
 
     if config["experiment"].get("verbose", False):
         print("\n" + "=" * 60)
