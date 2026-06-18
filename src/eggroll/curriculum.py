@@ -15,7 +15,7 @@ from .head import compute_counts, count_diagnostics
 from .hooks import forward_atom_features, pooled_embedding
 from .init_warmstart import init_head_warmstart
 from .lora import discover_lora_targets, init_lora_params, build_override, lora_weights
-from .diagnostics import canary_probe, adapter_norm
+from .diagnostics import canary_probe, adapter_norm, ridge_cond, head_drift, floor_flag
 from .optimizer import Eggroll
 from .readout import fit_delta, predict_delta, rmse, rmse_tensor, linear_probe
 
@@ -63,6 +63,7 @@ def run_curriculum(model, splits: Dict, eg: Dict, device, log_every: int = 20) -
 
     W0, b0 = init_head_warmstart(tr["hs"], tr["es"], tr["y"], H, lam,
                                  fire_rate=0.5, noise=0.01, seed=seed_train)
+    W0_init = W0.clone()  # giữ để đo head_drift cuối
     d0 = count_diagnostics(_counts_pre(W0, b0, tr), n_atoms=tr["hs"].shape[0])
     print(f"[warm-start] fire_rate mean={d0['fire_mean']:.3f} dead={d0['n_dead']} "
           f"sat={d0['n_sat']}")
@@ -173,13 +174,28 @@ def run_curriculum(model, splits: Dict, eg: Dict, device, log_every: int = 20) -
         test_rmse, _ = eval_full(best["head_W"], best["head_b"], best["A"], best["B"], te)
         valid_rmse, _ = eval_full(best["head_W"], best["head_b"], best["A"], best["B"], va)
         train_rmse, _ = eval_full(best["head_W"], best["head_b"], best["A"], best["B"], tr)
+        ov = build_override(model, best["A"], best["B"], r, alpha)
+        hs_tr, es_tr, bi, nm = _fwd(tr["inputs"], ov)
+        c_tr = compute_counts(best["head_W"], best["head_b"], hs_tr, bi, nm)
     else:
         test_rmse = _eval_pre(best["head_W"], best["head_b"], te)
         valid_rmse = _eval_pre(best["head_W"], best["head_b"], va)
         train_rmse = _eval_pre(best["head_W"], best["head_b"], tr)
+        es_tr, c_tr = tr["es"], _counts_pre(best["head_W"], best["head_b"], tr)
 
     print(f"[BEST {best_phase}@step {best_step}] train={train_rmse:.4f} "
           f"valid={valid_rmse:.4f} test={test_rmse:.4f}")
+
+    # --- diagnostics cuối (§10) ---
+    m_best = fit_delta(es_tr, c_tr, tr["y"], lam, co)
+    c_std = (c_tr - m_best["c_mean"]) / m_best["c_sd"]
+    dfin = count_diagnostics(c_tr, n_atoms=tr["hs"].shape[0])
+    flag = floor_flag(best_val, va["y"])
+    print(f"[diag] fire={dfin['fire_mean']:.3f}[{dfin['fire_min']:.3f},{dfin['fire_max']:.3f}] "
+          f"dead={dfin['n_dead']} sat={dfin['n_sat']} count_mean={dfin['count_mean']:.2f} | "
+          f"head_drift={head_drift(best['head_W'], W0_init):.3f} "
+          f"‖coef_c‖={float(m_best['coef_c'].norm()):.3f} ridge_cond={ridge_cond(c_std, lam):.1f}"
+          f"{'  FLOOR_FLAG!!' if flag else ''}")
 
     return {
         "floor_test": floor_test, "floor_valid": floor_valid,

@@ -259,7 +259,11 @@ def main():
         tm, ts = _ms(test_scores)
         print(f"\n{'='*60}\nTest RMSE ({len(args.seed_split)} seed):")
         print(f"  T1 floor (linear-probe): {fm:.4f} ± {fs:.4f}")
-        print(f"  Eggroll P1 (head):       {tm:.4f} ± {ts:.4f}")
+        print(f"  Eggroll (hard-count):    {tm:.4f} ± {ts:.4f}")
+        # Tham chiếu vanilla SchNet (deterministic, scaffold, 5 seed)
+        ref = {"esol": (0.8994, 0.0946)}.get(args.dataset)
+        if ref:
+            print(f"  vanilla SchNet ref:      {ref[0]:.4f} ± {ref[1]:.4f}")
         print(f"{'='*60}")
 
 

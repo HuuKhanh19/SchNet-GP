@@ -27,3 +27,21 @@ def adapter_norm(A: Dict[str, Tensor], B: Dict[str, Tensor], r: int, alpha: floa
         delta = scale * (B[wname] @ A[wname])
         total += float((delta ** 2).sum())
     return total ** 0.5
+
+
+def ridge_cond(c_std_train: Tensor, lam: float) -> float:
+    """Số điều kiện của (CᵀC + λI) — health của ridge T2 (counts đã chuẩn hoá)."""
+    d = c_std_train.shape[1]
+    A = c_std_train.t() @ c_std_train + lam * torch.eye(
+        d, device=c_std_train.device, dtype=c_std_train.dtype)
+    return float(torch.linalg.cond(A).item())
+
+
+def head_drift(W: Tensor, W0: Tensor) -> float:
+    """‖ΔW‖/‖W0‖ — head đã đi xa warm-start bao nhiêu (tương đối)."""
+    return float((W - W0).norm() / W0.norm().clamp_min(1e-12))
+
+
+def floor_flag(best_val: float, y_val: Tensor) -> bool:
+    """True nếu best-val > std(val_y): model còn tệ hơn dự đoán hằng số (báo động)."""
+    return best_val > float(y_val.std())
