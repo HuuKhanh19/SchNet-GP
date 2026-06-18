@@ -52,13 +52,14 @@ def rmse_tensor(pred: Tensor, target: Tensor) -> Tensor:
 def linear_probe(
     e_train: Tensor, y_train: Tensor,
     e_eval: Tensor, y_eval: Tensor,
-    lam: float = 1.0,
+    lam: float = 1.0, task_type: str = "regression",
 ) -> Tuple[float, Tensor]:
-    """Ridge linear-probe trên embedding -> RMSE (đơn vị gốc, vd. log-S).
+    """Ridge linear-probe trên embedding -> cost (lower better: RMSE hoặc 1−AUC).
 
-    Standardize y theo train (mean/std), fit ridge e->y_std, predict, un-standardize.
-    Trả (rmse_eval, coef). Dùng cho gate Stage A (e_pooled phải đạt ~0.99 trên ESOL).
+    Standardize y theo train, fit ridge e->y_std, predict, un-standardize (affine không
+    đổi ranking nên AUC giữ nguyên). Trả (cost_eval, coef).
     """
+    from .metrics import cost_float
     y_mean = y_train.mean()
     y_std = y_train.std().clamp_min(1e-6)
     yt = (y_train - y_mean) / y_std
@@ -66,7 +67,7 @@ def linear_probe(
     coef = ridge_fit(e_train, yt, lam)
     pred_std = ridge_predict(e_eval, coef)
     pred = pred_std * y_std + y_mean
-    return rmse(pred, y_eval), coef
+    return cost_float(pred, y_eval, task_type), coef
 
 
 # =============================================================================

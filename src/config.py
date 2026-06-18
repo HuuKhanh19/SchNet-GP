@@ -175,6 +175,7 @@ def build_eggroll_config(args) -> dict:
         # --- Eggroll (head hard-count + LoRA + ES) ---
         "eggroll": {
             "encoder": args.encoder,          # path template, có thể chứa "{seed}"
+            "task_type": DATASETS[args.dataset]["task_type"],  # regression | classification
             "seed_train": args.seed_train,
             "H": args.H,                      # số rule (hard-count head)
             "ridge_lambda": args.ridge_lambda,

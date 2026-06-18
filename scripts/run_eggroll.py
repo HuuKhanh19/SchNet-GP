@@ -220,7 +220,8 @@ def run_seed(config, seed: int, device, smoke: bool) -> dict:
 
     log_every = 1 if smoke else 20
     res = run_curriculum(model, splits, eg, device, log_every=log_every)
-    return {"seed": seed, "floor_test": res["floor_test"], "test_rmse": res["test_rmse"]}
+    return {"seed": seed, "floor_test": res["floor_test"],
+            "test_metric": res["test_metric"], "metric_name": res["metric_name"]}
 
 
 def main():
@@ -246,18 +247,19 @@ def main():
         print("Using CPU")
 
     config = build_eggroll_config(args)
-    floor_scores, test_scores = [], []
+    floor_scores, test_scores, mname = [], [], "RMSE"
     for seed in args.seed_split:
         res = run_seed(config, seed, device, args.smoke)
         floor_scores.append(res["floor_test"])
-        test_scores.append(res["test_rmse"])
+        test_scores.append(res["test_metric"])
+        mname = res["metric_name"]
 
     if len(args.seed_split) > 1:
         def _ms(xs):
             return statistics.mean(xs), (statistics.stdev(xs) if len(xs) > 1 else 0.0)
         fm, fs = _ms(floor_scores)
         tm, ts = _ms(test_scores)
-        print(f"\n{'='*60}\nTest RMSE ({len(args.seed_split)} seed):")
+        print(f"\n{'='*60}\nTest {mname} ({len(args.seed_split)} seed):")
         print(f"  T1 floor (linear-probe): {fm:.4f} ± {fs:.4f}")
         print(f"  Eggroll (hard-count):    {tm:.4f} ± {ts:.4f}")
         # Tham chiếu vanilla SchNet (deterministic, scaffold, 5 seed)
