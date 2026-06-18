@@ -1,113 +1,188 @@
-"""§9 — Curriculum driver. Stage C: chỉ P1 (head warm-up, encoder frozen).
+"""§9 — Curriculum driver: P1 (head warm-up) -> P2 (gentle co-adapt LoRA).
 
 P1: adapter freeze (=0) -> encoder = base. Precompute h, e_pooled, standardize h per-dim
-một lần (encoder cố định). eggroll tối ưu CHỈ head trên embedding cố định -> nhanh, N lớn
-được. Model selection = best-val. (P2 gentle co-adapt LoRA: thêm ở Stage D.)
+một lần. eggroll tối ưu CHỈ head trên embedding cố định -> nhanh, N lớn được.
+P2: unfreeze {A_l,B_l}. eggroll {adapter+head}, forward per-member qua functional_call
+(σ_adapter nhẹ, phase ngắn). Canary drift mỗi step (linear-probe e_pooled phải giữ ~floor).
+Model selection xuyên suốt 2 phase = best-val checkpoint.
 """
 
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 
 from .head import compute_counts, count_diagnostics
-from .hooks import pooled_embedding
+from .hooks import forward_atom_features, pooled_embedding
 from .init_warmstart import init_head_warmstart
+from .lora import discover_lora_targets, init_lora_params, build_override, lora_weights
+from .diagnostics import canary_probe, adapter_norm
 from .optimizer import Eggroll
 from .readout import fit_delta, predict_delta, rmse, rmse_tensor, linear_probe
 
+LORA_INIT_STD = 0.01   # std init A (B=0 -> hiệu lực ban đầu = 0)
 
-def _standardize_splits(splits: Dict, device):
-    """Standardize per-atom h per-dim bằng stats atom-train; recompute e_pooled từ h chuẩn hoá."""
+
+def _standardize_splits(splits: Dict) -> Tuple[Dict, torch.Tensor, torch.Tensor]:
+    """Standardize per-atom h per-dim (stats atom-train); recompute e_pooled từ h chuẩn hoá."""
     h_mean = splits["train"]["h"].mean(dim=0, keepdim=True)
     h_sd = splits["train"]["h"].std(dim=0, keepdim=True).clamp_min(1e-6)
     for s in splits.values():
         s["hs"] = (s["h"] - h_mean) / h_sd
         s["es"] = pooled_embedding(s["hs"], s["batch_idx"], s["num_mols"])
-    return splits
+    return splits, h_mean, h_sd
 
 
-def run_curriculum(splits: Dict, eg: Dict, device, log_every: int = 20) -> Dict:
-    """Chạy P1 (Stage C). Trả dict kết quả + best head."""
-    lam = eg["ridge_lambda"]
-    co = eg["counts_only"]
-    H = eg["H"]
+def run_curriculum(model, splits: Dict, eg: Dict, device, log_every: int = 20) -> Dict:
+    lam, co, H = eg["ridge_lambda"], eg["counts_only"], eg["H"]
     seed_train = eg["seed_train"]
+    r, alpha = eg["lora_r"], eg["lora_alpha"]
 
-    splits = _standardize_splits(splits, device)
+    splits, h_mean, h_sd = _standardize_splits(splits)
     tr, va, te = splits["train"], splits["valid"], splits["test"]
 
-    # T1 floor tham chiếu (trên e_pooled chuẩn hoá)
     floor_test, _ = linear_probe(tr["es"], tr["y"], te["es"], te["y"], lam)
     floor_valid, _ = linear_probe(tr["es"], tr["y"], va["es"], va["y"], lam)
     print(f"[T1 floor std] linear-probe RMSE: valid={floor_valid:.4f} test={floor_test:.4f}")
 
-    # Warm-start head (§7)
+    # =====================================================================
+    # P1 — head only (precomputed hs/es, encoder frozen)
+    # =====================================================================
+    def _counts_pre(W, b, s):
+        return compute_counts(W, b, s["hs"], s["batch_idx"], s["num_mols"])
+
+    def _eval_pre(W, b, target) -> float:
+        c_tr = _counts_pre(W, b, tr)
+        c_s = _counts_pre(W, b, target)
+        m = fit_delta(tr["es"], c_tr, tr["y"], lam, co)
+        return rmse(predict_delta(m, target["es"], c_s), target["y"])
+
+    def _eval_train_pre(theta):
+        c = _counts_pre(theta["head_W"], theta["head_b"], tr)
+        m = fit_delta(tr["es"], c, tr["y"], lam, co)
+        return rmse_tensor(predict_delta(m, tr["es"], c), tr["y"])
+
     W0, b0 = init_head_warmstart(tr["hs"], tr["es"], tr["y"], H, lam,
                                  fire_rate=0.5, noise=0.01, seed=seed_train)
-    diag0 = count_diagnostics(
-        compute_counts(W0, b0, tr["hs"], tr["batch_idx"], tr["num_mols"]),
-        n_atoms=tr["hs"].shape[0])
-    print(f"[warm-start] fire_rate mean={diag0['fire_mean']:.3f} "
-          f"dead={diag0['n_dead']} sat={diag0['n_sat']}")
+    d0 = count_diagnostics(_counts_pre(W0, b0, tr), n_atoms=tr["hs"].shape[0])
+    print(f"[warm-start] fire_rate mean={d0['fire_mean']:.3f} dead={d0['n_dead']} "
+          f"sat={d0['n_sat']}")
 
-    # --- eval helpers ---
-    def _eval_train(theta):
-        c = compute_counts(theta["head_W"], theta["head_b"],
-                           tr["hs"], tr["batch_idx"], tr["num_mols"])
-        model = fit_delta(tr["es"], c, tr["y"], lam, co)
-        return rmse_tensor(predict_delta(model, tr["es"], c), tr["y"])
-
-    def _eval_split(W, b, s) -> float:
-        c_tr = compute_counts(W, b, tr["hs"], tr["batch_idx"], tr["num_mols"])
-        c_s = compute_counts(W, b, s["hs"], s["batch_idx"], s["num_mols"])
-        model = fit_delta(tr["es"], c_tr, tr["y"], lam, co)
-        return rmse(predict_delta(model, s["es"], c_s), s["y"])
-
-    # --- P1 eggroll ---
-    egg = Eggroll(
-        params2d={"head_W": W0}, params1d={"head_b": b0},
-        sigma2d={"head_W": eg["sigma_head"]}, sigma1d={"head_b": eg["sigma_head"]},
-        pop_size=eg["pop_size"], es_lr=eg["es_lr"],
-        total_steps=eg["p1_epochs"], gen_seed=seed_train,
-    )
+    egg = Eggroll({"head_W": W0}, {"head_b": b0},
+                  {"head_W": eg["sigma_head"]}, {"head_b": eg["sigma_head"]},
+                  eg["pop_size"], eg["es_lr"], eg["p1_epochs"], gen_seed=seed_train)
 
     cur = egg.current()
-    best_val = _eval_split(cur["head_W"], cur["head_b"], va)
-    best = {k: v.clone() for k, v in cur.items()}
-    best_step = 0
+    best_val = _eval_pre(cur["head_W"], cur["head_b"], va)
+    best = {"head_W": cur["head_W"].clone(), "head_b": cur["head_b"].clone(),
+            "A": None, "B": None}
+    best_step, best_phase = 0, "P1"
     print(f"[P1] init val={best_val:.4f}")
 
     for step in range(1, eg["p1_epochs"] + 1):
-        losses = egg.step(_eval_train)
+        losses = egg.step(_eval_train_pre)
         cur = egg.current()
-        val = _eval_split(cur["head_W"], cur["head_b"], va)
+        val = _eval_pre(cur["head_W"], cur["head_b"], va)
         if val < best_val:
-            best_val, best_step = val, step
-            best = {k: v.clone() for k, v in cur.items()}
-
+            best_val, best_step, best_phase = val, step, "P1"
+            best = {"head_W": cur["head_W"].clone(), "head_b": cur["head_b"].clone(),
+                    "A": None, "B": None}
         if step % log_every == 0 or step == 1:
-            lo = float(losses.min()); me = float(losses.mean()); hi = float(losses.max())
-            print(f"[P1] step {step:4d} | train_fit best={lo:.4f} mean={me:.4f} "
-                  f"worst={hi:.4f} spread={hi-lo:.4f} | val={val:.4f} "
-                  f"best_val={best_val:.4f}@{best_step} | lr={egg.lr:.2e}")
+            lo, me, hi = float(losses.min()), float(losses.mean()), float(losses.max())
+            print(f"[P1] step {step:4d} | fit best={lo:.4f} mean={me:.4f} worst={hi:.4f} "
+                  f"spread={hi-lo:.4f} | val={val:.4f} best_val={best_val:.4f}@{best_step} "
+                  f"| lr={egg.lr:.2e}")
 
-    # --- model selection -> test ---
-    Wb, bb = best["head_W"], best["head_b"]
-    test_rmse = _eval_split(Wb, bb, te)
-    valid_rmse = _eval_split(Wb, bb, va)
-    train_rmse = _eval_split(Wb, bb, tr)
-    final_diag = count_diagnostics(
-        compute_counts(Wb, bb, tr["hs"], tr["batch_idx"], tr["num_mols"]),
-        n_atoms=tr["hs"].shape[0])
-    print(f"[P1 best @step {best_step}] train={train_rmse:.4f} valid={valid_rmse:.4f} "
-          f"test={test_rmse:.4f} | fire_rate={final_diag['fire_mean']:.3f} "
-          f"dead={final_diag['n_dead']} sat={final_diag['n_sat']}")
+    print(f"[P1 done] best_val={best_val:.4f}@{best_step} | test(best head)="
+          f"{_eval_pre(best['head_W'], best['head_b'], te):.4f}")
+
+    # =====================================================================
+    # P2 — gentle co-adapt (LoRA + head), forward per-member
+    # =====================================================================
+    eval_full = None
+    if eg["p2_epochs"] > 0:
+        targets = discover_lora_targets(model)
+        A0, B0 = init_lora_params(targets, r, LORA_INIT_STD, seed_train,
+                                  device, tr["hs"].dtype)
+        params2d = {"head_W": best["head_W"].clone()}
+        sigma2d = {"head_W": eg["sigma_head"]}
+        for w in targets:
+            params2d["A::" + w], params2d["B::" + w] = A0[w], B0[w]
+            sigma2d["A::" + w] = sigma2d["B::" + w] = eg["sigma_adapter"]
+        params1d = {"head_b": best["head_b"].clone()}
+        sigma1d = {"head_b": eg["sigma_head"]}
+
+        egg2 = Eggroll(params2d, params1d, sigma2d, sigma1d,
+                       eg["pop_size"], eg["es_lr"], eg["p2_epochs"], gen_seed=seed_train + 1)
+
+        def _split_AB(theta):
+            return ({w: theta["A::" + w] for w in targets},
+                    {w: theta["B::" + w] for w in targets})
+
+        def _fwd(inputs, override):
+            with lora_weights(model, override):
+                h, bi, nm = forward_atom_features(model, inputs)
+            hs = (h - h_mean) / h_sd
+            return hs, pooled_embedding(hs, bi, nm), bi, nm
+
+        def _eval_train_p2(theta):
+            A, B = _split_AB(theta)
+            ov = build_override(model, A, B, r, alpha)
+            hs, e, bi, nm = _fwd(tr["inputs"], ov)
+            c = compute_counts(theta["head_W"], theta["head_b"], hs, bi, nm)
+            m = fit_delta(e, c, tr["y"], lam, co)
+            return rmse_tensor(predict_delta(m, e, c), tr["y"])
+
+        def eval_full(W, b, A, B, target):
+            """Forward encoder+adapter cho train+target -> (rmse, canary)."""
+            ov = build_override(model, A, B, r, alpha)
+            hs_tr, e_tr, bi, nm = _fwd(tr["inputs"], ov)
+            c_tr = compute_counts(W, b, hs_tr, bi, nm)
+            hs_s, e_s, bis, nms = _fwd(target["inputs"], ov)
+            c_s = compute_counts(W, b, hs_s, bis, nms)
+            m = fit_delta(e_tr, c_tr, tr["y"], lam, co)
+            rv = rmse(predict_delta(m, e_s, c_s), target["y"])
+            can = canary_probe(e_tr, tr["y"], e_s, target["y"], lam)
+            return rv, can
+
+        cur = egg2.current()
+        A, B = _split_AB(cur)
+        v0, can0 = eval_full(cur["head_W"], cur["head_b"], A, B, va)
+        print(f"[P2] init val={v0:.4f} canary={can0:.4f} (floor_valid={floor_valid:.4f})")
+
+        for step in range(1, eg["p2_epochs"] + 1):
+            losses = egg2.step(_eval_train_p2)
+            cur = egg2.current()
+            A, B = _split_AB(cur)
+            val, can = eval_full(cur["head_W"], cur["head_b"], A, B, va)
+            if val < best_val:
+                best_val, best_step, best_phase = val, step, "P2"
+                best = {"head_W": cur["head_W"].clone(), "head_b": cur["head_b"].clone(),
+                        "A": {w: A[w].clone() for w in targets},
+                        "B": {w: B[w].clone() for w in targets}}
+            if step % log_every == 0 or step == 1:
+                lo, hi = float(losses.min()), float(losses.max())
+                nrm = adapter_norm(A, B, r, alpha)
+                print(f"[P2] step {step:4d} | fit best={lo:.4f} spread={hi-lo:.4f} | "
+                      f"val={val:.4f} best_val={best_val:.4f}@{best_step}({best_phase}) | "
+                      f"canary={can:.4f} | ‖Δadapter‖={nrm:.3f} | lr={egg2.lr:.2e}")
+
+    # =====================================================================
+    # Model selection -> test (branch theo có adapter hay không)
+    # =====================================================================
+    if best["A"] is not None:
+        test_rmse, _ = eval_full(best["head_W"], best["head_b"], best["A"], best["B"], te)
+        valid_rmse, _ = eval_full(best["head_W"], best["head_b"], best["A"], best["B"], va)
+        train_rmse, _ = eval_full(best["head_W"], best["head_b"], best["A"], best["B"], tr)
+    else:
+        test_rmse = _eval_pre(best["head_W"], best["head_b"], te)
+        valid_rmse = _eval_pre(best["head_W"], best["head_b"], va)
+        train_rmse = _eval_pre(best["head_W"], best["head_b"], tr)
+
+    print(f"[BEST {best_phase}@step {best_step}] train={train_rmse:.4f} "
+          f"valid={valid_rmse:.4f} test={test_rmse:.4f}")
 
     return {
-        "floor_test": floor_test,
-        "p1_best_val": best_val,
-        "p1_best_step": best_step,
-        "test_rmse": test_rmse,
-        "valid_rmse": valid_rmse,
-        "best_head": best,
+        "floor_test": floor_test, "floor_valid": floor_valid,
+        "best_phase": best_phase, "best_step": best_step, "best_val": best_val,
+        "test_rmse": test_rmse, "valid_rmse": valid_rmse, "best": best,
     }

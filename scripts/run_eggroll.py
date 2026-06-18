@@ -28,7 +28,9 @@ sys.path.insert(0, project_root)
 from src.config import DATASETS, build_eggroll_config
 from src.data.data_loader import prepare_dataset, save_splits, SchNetMolDataset
 from src.models.schnet import build_schnet_model
-from src.eggroll.hooks import build_full_batch, extract_atom_features, pooled_embedding
+from src.eggroll.hooks import (
+    build_full_batch, prepare_inputs, forward_atom_features, pooled_embedding,
+)
 from src.eggroll.curriculum import run_curriculum
 
 
@@ -173,12 +175,17 @@ def load_encoder(config, seed: int, device, smoke: bool):
 
 
 def embed_split(model, dataset, device):
-    """Trả dict {h, batch_idx, num_mols, e, y} cho một split (full-batch)."""
+    """Trả dict {h, batch_idx, num_mols, e, y, inputs} cho một split (full-batch).
+
+    Giữ `inputs` để P2 re-forward encoder với adapter (functional_call).
+    """
     batch = build_full_batch(dataset)
-    h, batch_idx, num_mols = extract_atom_features(model, batch, device)
+    inputs = prepare_inputs(batch, device)
+    h, batch_idx, num_mols = forward_atom_features(model, inputs)
     e = pooled_embedding(h, batch_idx, num_mols)
     y = batch["target"].to(device)
-    return {"h": h, "batch_idx": batch_idx, "num_mols": num_mols, "e": e, "y": y}
+    return {"h": h, "batch_idx": batch_idx, "num_mols": num_mols, "e": e, "y": y,
+            "inputs": inputs}
 
 
 # =============================================================================
@@ -199,7 +206,7 @@ def run_seed(config, seed: int, device, smoke: bool) -> dict:
     eg = dict(config["eggroll"])  # copy để smoke override không rò sang seed sau
     if smoke:
         _apply_smoke(eg)
-    print(f"\n{'='*60}\nEggroll Stage C (P1) — {config['dataset_name'].upper()} seed {seed}"
+    print(f"\n{'='*60}\nEggroll Stage D (P1+P2) — {config['dataset_name'].upper()} seed {seed}"
           f"\n{'='*60}")
 
     datasets = load_datasets(config, smoke)
@@ -212,7 +219,7 @@ def run_seed(config, seed: int, device, smoke: bool) -> dict:
           f"test={tuple(splits['test']['e'].shape)}")
 
     log_every = 1 if smoke else 20
-    res = run_curriculum(splits, eg, device, log_every=log_every)
+    res = run_curriculum(model, splits, eg, device, log_every=log_every)
     return {"seed": seed, "floor_test": res["floor_test"], "test_rmse": res["test_rmse"]}
 
 

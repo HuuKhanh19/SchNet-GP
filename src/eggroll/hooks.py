@@ -59,36 +59,25 @@ def atom_to_mol_index(inputs: Dict[str, Tensor]) -> Tensor:
     return conf_to_mol[atom_to_conf]
 
 
+def prepare_inputs(batch: Dict[str, Tensor], device: torch.device) -> Dict[str, Tensor]:
+    """Đưa batch (bỏ target) lên device — giữ lại để re-forward encoder ở P2."""
+    return {k: v.to(device) for k, v in batch.items() if k != "target"}
+
+
 @torch.no_grad()
-def extract_atom_features(
-    model,
-    batch: Dict[str, Tensor],
-    device: torch.device,
-    param_override: Optional[Dict[str, Tensor]] = None,
+def forward_atom_features(
+    model, inputs: Dict[str, Tensor],
 ) -> Tuple[Tensor, Tensor, int]:
-    """Trả (h, batch_idx, num_mols).
+    """Trả (h, batch_idx, num_mols) từ inputs đã ở device.
 
-    h: per-atom features (n_atoms, hidden) sau interaction cuối.
-    batch_idx: (n_atoms,) ánh xạ atom -> molecule.
-    num_mols: số phân tử trong batch.
-
-    param_override (dùng ở P2/LoRA): dict {tên param -> tensor} truyền vào
-    torch.func.functional_call để chạy encoder với adapter mà KHÔNG mutate base in-place.
+    h: per-atom features (n_atoms, hidden) sau interaction cuối. Để chạy encoder với
+    adapter (P2/LoRA), bọc lời gọi bằng `with lora_weights(model, override):` (src/eggroll/lora.py)
+    — KHÔNG dùng functional_call vì SchNet tied-weights (mlp == conv.nn) khiến nó restore sai.
     """
     model.eval()
-    inputs = {k: v.to(device) for k, v in batch.items() if k != "target"}
-
-    if param_override is None:
-        out = model(inputs, return_atom_emb_only=True)
-    else:
-        from torch.func import functional_call
-        out = functional_call(
-            model, param_override, args=(inputs,),
-            kwargs={"return_atom_emb_only": True},
-        )
-
-    h = out["atom_embeddings"]                       # (n_atoms, hidden)
-    batch_idx = atom_to_mol_index(inputs)            # (n_atoms,)
+    out = model(inputs, return_atom_emb_only=True)
+    h = out["atom_embeddings"]                        # (n_atoms, hidden)
+    batch_idx = atom_to_mol_index(inputs)             # (n_atoms,)
     num_mols = int(inputs["_idx_conf_to_mol"].max().item()) + 1
     return h, batch_idx, num_mols
 
