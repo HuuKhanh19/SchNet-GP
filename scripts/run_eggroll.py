@@ -209,7 +209,19 @@ def run_seed(config, seed: int, device, smoke: bool) -> dict:
 
 
 def main():
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # Guard chống leak per-seed: quét nhiều seed mà template encoder thiếu '{seed}' ->
+    # mọi seed nạp CÙNG một encoder (sai split -> leak test). Hay gặp khi PowerShell nuốt
+    # '{seed}' do không quote. (smoke bỏ qua: cho phép encoder random/dùng chung.)
+    if (not args.smoke and len(args.seed_split) > 1
+            and "{seed}" not in args.encoder):
+        parser.error(
+            f"--encoder='{args.encoder}' thiếu '{{seed}}' khi quét "
+            f"{len(args.seed_split)} seed -> mọi seed nạp cùng 1 encoder (leak). "
+            f"Dùng path có '{{seed}}' và QUOTE trên PowerShell, vd:\n"
+            f'  --encoder "pretrained/esol/seed_{{seed}}.pt"')
 
     if torch.cuda.is_available() and args.gpu >= 0:
         device = torch.device(f"cuda:{args.gpu}")

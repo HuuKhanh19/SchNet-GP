@@ -266,6 +266,16 @@ def main():
     args = parser.parse_args()
     print_overrides(parser, args)
 
+    # Guard chống leak: quét nhiều seed mà template encoder-out KHÔNG có '{seed}' ->
+    # mọi seed ghi đè cùng 1 file (chỉ còn encoder seed cuối) -> nạp sai/leak ở eggroll.
+    # (Hay gặp khi PowerShell nuốt '{seed}' do không quote -> nhắc quote luôn.)
+    if args.encoder_out and len(args.seed_split) > 1 and "{seed}" not in args.encoder_out:
+        parser.error(
+            f"--encoder-out='{args.encoder_out}' thiếu '{{seed}}' khi quét "
+            f"{len(args.seed_split)} seed -> các seed sẽ ghi đè cùng 1 file (leak). "
+            f"Dùng path có '{{seed}}' và QUOTE trên PowerShell, vd:\n"
+            f'  --encoder-out "pretrained/esol/seed_{{seed}}.pt"')
+
     # Device
     if torch.cuda.is_available() and args.gpu >= 0:
         device = torch.device(f"cuda:{args.gpu}")
