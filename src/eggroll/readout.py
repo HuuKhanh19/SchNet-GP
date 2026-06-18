@@ -44,6 +44,11 @@ def rmse(pred: Tensor, target: Tensor) -> float:
     return float(torch.sqrt(torch.mean((pred - target) ** 2)).item())
 
 
+def rmse_tensor(pred: Tensor, target: Tensor) -> Tensor:
+    """RMSE dạng 0-dim tensor (không .item() -> tránh sync mỗi member trong vòng ES)."""
+    return torch.sqrt(torch.mean((pred - target) ** 2))
+
+
 def linear_probe(
     e_train: Tensor, y_train: Tensor,
     e_eval: Tensor, y_eval: Tensor,
