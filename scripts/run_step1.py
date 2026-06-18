@@ -148,6 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "model giữ trong RAM). Bật bằng --save khi muốn giữ kết quả.")
     e.add_argument("--verbose", action="store_true",
                    help="In thêm shape của từng tham số model.")
+    e.add_argument("--encoder-out", default=None, dest="encoder_out",
+                   help="Xuất encoder state_dict (best model) ra path này để warm-start "
+                        "eggroll. Có thể chứa '{seed}' -> thay bằng split seed "
+                        "(per-seed, tránh leak), vd. pretrained/esol/seed_{seed}.pt. "
+                        "Mặc định không xuất.")
     return p
 
 
@@ -223,6 +228,16 @@ def run_step1(config: dict, device: torch.device) -> dict:
     results = trainer.train(train_loader, valid_loader, test_loader)
     if config["experiment"].get("save", True):
         print(f"\nResults saved to: {exp_dir}")
+
+    # Xuất encoder warm-start (best model đã được trainer restore vào model). Độc lập
+    # với --save: per-seed path khớp split seed để eggroll nạp đúng (tránh leak).
+    encoder_out = config["experiment"].get("encoder_out")
+    if encoder_out:
+        encoder_path = encoder_out.format(seed=split_seed)
+        os.makedirs(os.path.dirname(encoder_path) or ".", exist_ok=True)
+        torch.save(model.state_dict(), encoder_path)
+        print(f"Encoder warm-start saved to: {encoder_path}")
+
     return results
 
 
