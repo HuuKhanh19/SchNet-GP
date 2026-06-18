@@ -29,7 +29,8 @@ from src.config import DATASETS, build_eggroll_config
 from src.data.data_loader import prepare_dataset, save_splits, SchNetMolDataset
 from src.models.schnet import build_schnet_model
 from src.eggroll.hooks import build_full_batch, extract_atom_features, pooled_embedding
-from src.eggroll.readout import linear_probe
+from src.eggroll.head import compute_counts, init_head_random, count_diagnostics
+from src.eggroll.readout import linear_probe, delta_rmse
 
 
 # =============================================================================
@@ -173,12 +174,12 @@ def load_encoder(config, seed: int, device, smoke: bool):
 
 
 def embed_split(model, dataset, device):
-    """Trả (e_pooled, y) cho một split (full-batch)."""
+    """Trả dict {h, batch_idx, num_mols, e, y} cho một split (full-batch)."""
     batch = build_full_batch(dataset)
     h, batch_idx, num_mols = extract_atom_features(model, batch, device)
     e = pooled_embedding(h, batch_idx, num_mols)
     y = batch["target"].to(device)
-    return e, y
+    return {"h": h, "batch_idx": batch_idx, "num_mols": num_mols, "e": e, "y": y}
 
 
 # =============================================================================
@@ -187,25 +188,48 @@ def embed_split(model, dataset, device):
 
 def run_seed(config, seed: int, device, smoke: bool) -> dict:
     config["data"]["random_seed_split"] = seed
-    print(f"\n{'='*60}\nEggroll Stage A — {config['dataset_name'].upper()} seed {seed}"
+    eg = config["eggroll"]
+    print(f"\n{'='*60}\nEggroll Stage B — {config['dataset_name'].upper()} seed {seed}"
           f"\n{'='*60}")
 
     datasets = load_datasets(config, smoke)
     model = load_encoder(config, seed, device, smoke)
 
-    e_train, y_train = embed_split(model, datasets["train"], device)
-    e_valid, y_valid = embed_split(model, datasets["valid"], device)
-    e_test, y_test = embed_split(model, datasets["test"], device)
-    print(f"e_pooled: train={tuple(e_train.shape)} valid={tuple(e_valid.shape)} "
-          f"test={tuple(e_test.shape)}")
+    tr = embed_split(model, datasets["train"], device)
+    va = embed_split(model, datasets["valid"], device)
+    te = embed_split(model, datasets["test"], device)
+    print(f"e_pooled: train={tuple(tr['e'].shape)} valid={tuple(va['e'].shape)} "
+          f"test={tuple(te['e'].shape)}")
 
-    lam = config["eggroll"]["ridge_lambda"]
-    rmse_train, _ = linear_probe(e_train, y_train, e_train, y_train, lam)
-    rmse_valid, _ = linear_probe(e_train, y_train, e_valid, y_valid, lam)
-    rmse_test, _ = linear_probe(e_train, y_train, e_test, y_test, lam)
-    print(f"linear-probe RMSE: train={rmse_train:.4f} valid={rmse_valid:.4f} "
-          f"test={rmse_test:.4f}")
-    return {"seed": seed, "probe_rmse_test": rmse_test, "probe_rmse_valid": rmse_valid}
+    lam = eg["ridge_lambda"]
+
+    # --- T1 floor: linear-probe trên e_pooled (Stage A reference) ---
+    probe_test, _ = linear_probe(tr["e"], tr["y"], te["e"], te["y"], lam)
+    probe_valid, _ = linear_probe(tr["e"], tr["y"], va["e"], va["y"], lam)
+    print(f"[T1 floor] linear-probe RMSE: valid={probe_valid:.4f} test={probe_test:.4f}")
+
+    # --- Stage B: hard-count head (RANDOM init) + delta readout (machinery check) ---
+    H = eg["H"]
+    W, b = init_head_random(tr["h"], H, fire_rate=0.5, seed=eg["seed_train"])
+    c_tr = compute_counts(W, b, tr["h"], tr["batch_idx"], tr["num_mols"])
+    c_va = compute_counts(W, b, va["h"], va["batch_idx"], va["num_mols"])
+    c_te = compute_counts(W, b, te["h"], te["batch_idx"], te["num_mols"])
+
+    diag = count_diagnostics(c_tr, n_atoms=tr["h"].shape[0])
+    print(f"[counts] H={H} fire_rate mean={diag['fire_mean']:.3f} "
+          f"[{diag['fire_min']:.3f},{diag['fire_max']:.3f}] "
+          f"dead={diag['n_dead']} sat={diag['n_sat']} "
+          f"count_max={diag['count_max']:.0f} mean={diag['count_mean']:.2f}")
+
+    co = eg["counts_only"]
+    delta_test, _ = delta_rmse(tr["e"], c_tr, tr["y"], te["e"], c_te, te["y"], lam, co)
+    delta_valid, _ = delta_rmse(tr["e"], c_tr, tr["y"], va["e"], c_va, va["y"], lam, co)
+    delta_train, _ = delta_rmse(tr["e"], c_tr, tr["y"], tr["e"], c_tr, tr["y"], lam, co)
+    tag = "counts-only" if co else "delta(T1+T2)"
+    print(f"[Stage B] {tag} readout (RANDOM head): train={delta_train:.4f} "
+          f"valid={delta_valid:.4f} test={delta_test:.4f}")
+
+    return {"seed": seed, "probe_test": probe_test, "delta_test": delta_test}
 
 
 def main():
@@ -231,16 +255,21 @@ def main():
         print("Using CPU")
 
     config = build_eggroll_config(args)
-    scores = []
+    probe_scores, delta_scores = [], []
     for seed in args.seed_split:
         res = run_seed(config, seed, device, args.smoke)
-        scores.append(res["probe_rmse_test"])
+        probe_scores.append(res["probe_test"])
+        delta_scores.append(res["delta_test"])
 
-    if len(scores) > 1:
-        mean = statistics.mean(scores)
-        std = statistics.stdev(scores) if len(scores) > 1 else 0.0
-        print(f"\n{'='*60}\nlinear-probe test RMSE: {mean:.4f} ± {std:.4f} "
-              f"({len(scores)} seed)\n{'='*60}")
+    if len(args.seed_split) > 1:
+        def _ms(xs):
+            return statistics.mean(xs), (statistics.stdev(xs) if len(xs) > 1 else 0.0)
+        pm, ps = _ms(probe_scores)
+        dm, ds = _ms(delta_scores)
+        print(f"\n{'='*60}\nTest RMSE ({len(args.seed_split)} seed):")
+        print(f"  T1 floor (linear-probe): {pm:.4f} ± {ps:.4f}")
+        print(f"  Stage B delta (RANDOM head): {dm:.4f} ± {ds:.4f}")
+        print(f"{'='*60}")
 
 
 if __name__ == "__main__":
