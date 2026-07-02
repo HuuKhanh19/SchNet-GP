@@ -42,10 +42,13 @@ class Step1Trainer:
 
         self.task_type = config['dataset']['task_type']
         self.metric_name = config['dataset'].get('metric', 'rmse')
+        # classification (nhị phân) + multilabel dùng chung đường loss/metric.
+        self.is_classification = self.task_type in ('classification', 'multilabel')
 
-        # Loss
-        if self.task_type == 'classification':
-            self.criterion = nn.BCELoss()
+        # Loss. Classification/multilabel: BCEWithLogits (model trả logit),
+        # reduction='none' để áp mask cho nhãn thiếu (multi-label).
+        if self.is_classification:
+            self.criterion = nn.BCEWithLogitsLoss(reduction='none')
         else:
             self.criterion = nn.MSELoss()
 
@@ -78,6 +81,35 @@ class Step1Trainer:
         self.history = []
 
     # ------------------------------------------------------------------
+    # Loss / metrics
+    # ------------------------------------------------------------------
+
+    def _compute_loss(self, pred, target, mask):
+        """Loss có mask cho nhãn thiếu (multi-label)."""
+        if self.is_classification:
+            # BCEWithLogits theo từng phần tử, chỉ tính trên nhãn có mặt.
+            per = self.criterion(pred, target)          # (B, T)
+            denom = mask.sum().clamp(min=1.0)
+            return (per * mask).sum() / denom
+        # regression: mask toàn 1 -> MSE thường.
+        return self.criterion(pred, target)
+
+    @staticmethod
+    def _mean_auc(preds, targets, masks) -> float:
+        """Mean per-task ROC-AUC (chuẩn MoleculeNet).
+
+        Bỏ qua task không đủ 2 lớp trong tập đánh giá; áp mask cho nhãn thiếu.
+        """
+        aucs = []
+        for t in range(preds.shape[1]):
+            m = masks[:, t] > 0
+            yt, pt = targets[m, t], preds[m, t]
+            if yt.size == 0 or np.unique(yt).size < 2:
+                continue
+            aucs.append(roc_auc_score(yt, pt))
+        return float(np.mean(aucs)) if aucs else 0.0
+
+    # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
 
@@ -88,12 +120,13 @@ class Step1Trainer:
 
         for batch in loader:
             batch = {k: v.to(self.device) for k, v in batch.items()}
-            target = batch.pop('target')
+            target = batch.pop('target')          # (B, T)
+            mask = batch.pop('target_mask')       # (B, T)
 
             self.optimizer.zero_grad()
             output = self.model(batch)
-            pred = output['prediction']
-            loss = self.criterion(pred, target)
+            pred = output['prediction']           # (B, T)
+            loss = self._compute_loss(pred, target, mask)
             loss.backward()
 
             if self.gradient_clip > 0:
@@ -116,34 +149,36 @@ class Step1Trainer:
         self.model.eval()
         all_preds = []
         all_targets = []
+        all_masks = []
         total_loss = 0.0
         n_samples = 0
 
         for batch in loader:
             batch = {k: v.to(self.device) for k, v in batch.items()}
-            target = batch.pop('target')
+            target = batch.pop('target')          # (B, T)
+            mask = batch.pop('target_mask')       # (B, T)
 
             output = self.model(batch)
-            pred = output['prediction']
-            loss = self.criterion(pred, target)
+            pred = output['prediction']           # (B, T)
+            loss = self._compute_loss(pred, target, mask)
 
             total_loss += loss.item() * target.shape[0]
             n_samples += target.shape[0]
             all_preds.append(pred.cpu().numpy())
             all_targets.append(target.cpu().numpy())
+            all_masks.append(mask.cpu().numpy())
 
-        preds = np.concatenate(all_preds)
+        preds = np.concatenate(all_preds)          # (N, T)
         targets = np.concatenate(all_targets)
+        masks = np.concatenate(all_masks)
 
         metrics = {'loss': total_loss / max(n_samples, 1)}
 
         if self.task_type == 'regression':
-            metrics['rmse'] = float(np.sqrt(np.mean((preds - targets) ** 2)))
+            m = masks > 0
+            metrics['rmse'] = float(np.sqrt(np.mean((preds[m] - targets[m]) ** 2)))
         else:
-            try:
-                metrics['auc'] = float(roc_auc_score(targets, preds))
-            except ValueError:
-                metrics['auc'] = 0.0
+            metrics['auc'] = self._mean_auc(preds, targets, masks)
 
         return metrics
 
@@ -151,9 +186,9 @@ class Step1Trainer:
         """Get validation score (lower is better for early stopping).
         
         Regression: returns RMSE directly.
-        Classification: returns -AUC so lower = better AUC.
+        Classification/multilabel: returns -AUC so lower = better AUC.
         """
-        if self.task_type == 'classification':
+        if self.is_classification:
             return -metrics.get('auc', 0.0)
         return metrics.get('rmse', metrics['loss'])
 

@@ -164,6 +164,7 @@ class SchNet(nn.Module):
         conf_readout: str = 'mean',
         scale: Optional[float] = None,
         task_type: str = "regression",
+        num_tasks: int = 1,
     ):
         super().__init__()
 
@@ -174,6 +175,7 @@ class SchNet(nn.Module):
         self.cutoff = cutoff
         self.scale = scale
         self.task_type = task_type
+        self.num_tasks = num_tasks
 
         # Atom embedding (Z=0..99, padding_idx=0) -- matches PyG exactly
         self.embedding = Embedding(100, hidden_channels, padding_idx=0)
@@ -198,10 +200,11 @@ class SchNet(nn.Module):
             for _ in range(num_interactions)
         ])
 
-        # Atom-level output network (matches PyG original)
+        # Atom-level output network (matches PyG original).
+        # lin2 ra `num_tasks` giá trị mỗi atom (1 = single-task; >1 = multi-label).
         self.lin1 = Linear(hidden_channels, hidden_channels // 2)
         self.act = ShiftedSoftplus()
-        self.lin2 = Linear(hidden_channels // 2, 1)
+        self.lin2 = Linear(hidden_channels // 2, num_tasks)
 
         # Target standardization (canonical SchNet / PyG): the net predicts
         # normalized targets; the molecule output is denormalized as
@@ -211,11 +214,9 @@ class SchNet(nn.Module):
         self.register_buffer('target_mean', torch.tensor(0.0))
         self.register_buffer('target_std', torch.tensor(1.0))
 
-        # Classification head
-        if task_type == "classification":
-            self.sigmoid = nn.Sigmoid()
-        else:
-            self.sigmoid = nn.Identity()
+        # Lưu ý: forward trả LOGIT cho classification/multilabel (không sigmoid).
+        # Loss dùng BCEWithLogits (ổn định số học); AUC tính trên logit vẫn đúng
+        # vì sigmoid đơn điệu.
 
         self.reset_parameters()
 
@@ -225,8 +226,12 @@ class SchNet(nn.Module):
             interaction.reset_parameters()
         torch.nn.init.xavier_uniform_(self.lin1.weight)
         self.lin1.bias.data.fill_(0)
-        torch.nn.init.xavier_uniform_(self.lin2.weight)
-        self.lin2.bias.data.fill_(0)
+        # Zero-init lớp output cuối ("zero last layer"): output ban đầu = 0.
+        #   - regression: pred ban đầu = mean(target) sau khi denormalize.
+        #   - classification/multilabel: logit ban đầu = 0 -> prob 0.5, tránh
+        #     sigmoid bão hoà do readout='add' cộng logit trên nhiều atom.
+        self.lin2.weight.data.zero_()
+        self.lin2.bias.data.zero_()
 
     def forward(
         self,
@@ -258,27 +263,25 @@ class SchNet(nn.Module):
         if return_atom_emb_only:
             return {'atom_embeddings': h}
 
-        # 4. Output network: H -> H//2 -> 1 (per-atom scalar)
+        # 4. Output network: H -> H//2 -> num_tasks (per-atom)
         h = self.lin1(h)
         h = self.act(h)
         h = self.lin2(h)
-        # h shape: (total_atoms, 1)
+        # h shape: (total_atoms, num_tasks)
 
         # 5. Hierarchical readout: atom -> conformer -> molecule
-        conf_out = self.readout(h, atom_to_conf, dim=0)            # (num_confs, 1)
-        mol_out = self.conf_readout(conf_out, conf_to_mol, dim=0)  # (batch_size, 1)
+        conf_out = self.readout(h, atom_to_conf, dim=0)            # (num_confs, T)
+        mol_out = self.conf_readout(conf_out, conf_to_mol, dim=0)  # (batch_size, T)
 
-        # 6. Squeeze to scalar
-        out = mol_out.squeeze(-1)  # (batch_size,)
+        out = mol_out  # (batch_size, num_tasks)
 
         if self.scale is not None:
             out = out * self.scale
 
-        if self.task_type == "classification":
-            out = self.sigmoid(out)
-        else:
+        if self.task_type == "regression":
             # Denormalize: net predicts standardized target -> original units.
             out = out * self.target_std + self.target_mean
+        # classification/multilabel: giữ nguyên LOGIT (sigmoid ở loss/metric).
 
         result = {"prediction": out}
 
@@ -365,5 +368,6 @@ def build_schnet_model(config: Dict) -> SchNet:
         conf_readout=schnet_cfg.get('conf_readout', 'mean'),
         scale=None,
         task_type=config['dataset']['task_type'],
+        num_tasks=config['dataset'].get('n_tasks', 1),
     )
     return schnet_model

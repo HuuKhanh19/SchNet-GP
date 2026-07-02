@@ -7,6 +7,11 @@ một dict config cùng cấu trúc như trước, nên không phải sửa.
 # =============================================================================
 # Registry dataset — thêm dataset mới ở đây
 # =============================================================================
+# Mỗi entry mô tả 1 dataset. Quy ước cột nhãn:
+#   - single-task (regression / classification): dùng `target_column` (1 cột).
+#   - multi-label classification: dùng `label_columns` (list các cột nhãn 0/1,
+#     cho phép ô trống = nhãn thiếu -> loss có mask).
+# `n_tasks` = số đầu ra của model (số cột nhãn). Suy ra tự động bên dưới.
 DATASETS = {
     "esol": dict(
         name="esol", file="refined_ESOL.csv",
@@ -28,7 +33,34 @@ DATASETS = {
         smiles_column="smiles", target_column="class",
         task_type="classification", metric="auc",
     ),
+    # Multi-label: 12 nhiệm vụ độc lính (Tox21). Ô trống trong CSV = nhãn thiếu.
+    "tox21": dict(
+        name="tox21", file="refined_Tox21.csv",
+        smiles_column="SMILES",
+        label_columns=[
+            "NR-AhR", "NR-AR-LBD", "NR-AR", "NR-Aromatase", "NR-ER-LBD",
+            "NR-ER", "NR-PPAR-gamma", "SR-ARE", "SR-ATAD5", "SR-HSE",
+            "SR-MMP", "SR-p53",
+        ],
+        task_type="multilabel", metric="auc",
+    ),
 }
+
+
+def dataset_label_columns(ds: dict) -> list:
+    """Danh sách cột nhãn của 1 dataset (nguồn CSV).
+
+    - multilabel: lấy `label_columns`.
+    - single-task: [target_column].
+    """
+    if ds["task_type"] == "multilabel":
+        return list(ds["label_columns"])
+    return [ds["target_column"]]
+
+
+def dataset_n_tasks(ds: dict) -> int:
+    """Số đầu ra của model = số cột nhãn."""
+    return len(dataset_label_columns(ds))
 
 
 def build_config(args) -> dict:
@@ -47,6 +79,11 @@ def build_config(args) -> dict:
     if isinstance(seed_split, (list, tuple)):
         seed_split = seed_split[0]
 
+    # Bổ sung n_tasks cho dataset (số đầu ra của model). Copy để không đụng
+    # vào registry gốc.
+    ds_cfg = dict(DATASETS[args.dataset])
+    ds_cfg["n_tasks"] = dataset_n_tasks(ds_cfg)
+
     return {
         # --- Global ---
         "dataset_name": args.dataset,
@@ -63,7 +100,7 @@ def build_config(args) -> dict:
         },
 
         # --- Dataset (đã resolve) ---
-        "dataset": DATASETS[args.dataset],
+        "dataset": ds_cfg,
 
         # --- Data / Splitting ---
         "data": {

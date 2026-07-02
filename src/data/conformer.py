@@ -235,7 +235,8 @@ def _minimize_energy(mol, conf_id=0):
         return np.inf
 
 def inner_smi2coords(
-    smi, seed=42, mode='fast', optimize=True, n_confs=3, prune_conf=False, return_2d=False, return_energy=False
+    smi, seed=42, mode='fast', optimize=True, n_confs=3, prune_conf=False,
+    prune_rms_thresh=0.0, return_2d=False, return_energy=False
 ):
     """
     Robust SMILES->3D coords:
@@ -256,21 +257,28 @@ def inner_smi2coords(
         ps.randomSeed = seed
         ps.useRandomCoords = bool(use_random)
         ps.maxIterations = int(max_attempts)
-        ps.numThreads = 0 
-        # check this code
-        if prune_conf:
-            ps.pruneRmsThresh = float(pruneRmsThresh)
+        ps.numThreads = 0
+        # Loại conformer gần trùng theo RMS (chỉ có tác dụng khi K>1 và ngưỡng>0).
+        if prune_conf or prune_rms_thresh > 0:
+            ps.pruneRmsThresh = float(prune_rms_thresh) if prune_rms_thresh > 0 else float(pruneRmsThresh)
         # print(list(AllChem.EmbedMultipleConfs(m, numConfs=int(n_confs), params=ps)))
         return list(AllChem.EmbedMultipleConfs(m, numConfs=int(n_confs), params=ps))
+    # Trả về nhất quán số phần tử: khi return_energy=True luôn kèm list năng lượng
+    # (tránh lỗi unpack ở caller khi phân tử fail / quá lớn).
+    def _ret(atoms_out, coords_out, energies_out):
+        if return_energy:
+            return atoms_out, coords_out, energies_out
+        return atoms_out, coords_out
+
     try:
         work_mol_no_H = Chem.MolFromSmiles(smi)
         work_mol = AllChem.AddHs(work_mol_no_H)
     except Exception as e:
         print(f"An error with smi {smi}, {e}")
-        return [None], [None]
+        return _ret([None], [None], [])
     if work_mol is None:
-        return [None], [None]
-    
+        return _ret([None], [None], [])
+
     if len(work_mol.GetAtoms()) > 400 or return_2d:
         print("large")
         # return 2D coords for very large molecules
@@ -289,8 +297,8 @@ def inner_smi2coords(
         
         coordinates = coords[keep_idx]
         assert len(atoms) == len(coordinates), "coordinates shape is not align with {}".format(smi)
-        return [atoms], [coordinates]
-        
+        return _ret([atoms], [coordinates], [np.inf])
+
 
     # 1) quick single conformer
     conf_ids = _embed_with_params(work_mol, n_confs=n_confs, use_random=False, max_attempts=200)
@@ -875,18 +883,3 @@ def floyd_warshall(M):
             if M[i, j] >= 510:
                 M[i, j] = 510
     return M
-
-def _minimize_energy(mol, conf_id=0):
-    """Try MMFF, else UFF. Returns energy (float) or np.inf if fails."""
-    try:
-        if AllChem.MMFFHasAllMoleculeParams(mol):
-            mp = AllChem.MMFFGetMoleculeProperties(mol)
-            ff = AllChem.MMFFGetMoleculeForceField(mol, mp, confId=conf_id)
-        else:
-            ff = AllChem.UFFGetMoleculeForceField(mol, confId=conf_id)
-        if ff is None:
-            return np.inf
-        ff.Minimize()
-        return float(ff.CalcEnergy())
-    except Exception:
-        return np.inf
